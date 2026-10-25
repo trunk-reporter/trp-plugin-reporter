@@ -30,6 +30,10 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 walkdir = "2"
 futures-util = "0.3"
 
+[dev-dependencies]
+# Reading response bodies in the API tests.
+http-body-util = "0.1"
+
 [profile.release]
 strip = true
 lto = true
