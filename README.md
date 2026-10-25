@@ -23,7 +23,7 @@ It starts with the default settings below and needs no configuration.
 | Setting | Default | Notes |
 |---|---|---|
 | Port | 8092 | |
-| Bind address | 127.0.0.1 | Use `0.0.0.0` to reach it from other machines. |
+| Bind address | 127.0.0.1 | Use `0.0.0.0` to reach it from other machines. Without an access token, anyone on the network can then read the call history. |
 | Access token | none | Leave empty for no login. When set, clients send it as a bearer token. |
 | Keep history for (days) | 0 | 0 keeps everything. |
 | Backfill from recorded calls on start | on | See Backfill. |
@@ -49,8 +49,10 @@ config file (`%APPDATA%\trunk-pro\` on Windows, `~/.config/trunk-pro/` on
 Linux, `~/Library/Application Support/trunk-pro/` on macOS, or beside the file
 given with `--config`). It needs a store from at least one run under TRP. Put
 the same settings TRP uses in `serve.json` there (`port`, `bind`, `token`,
-`retentionDays`, `backfill`); without it the defaults apply. The capture folder
-is read from the store.
+`retentionDays`, `backfill`); without it the defaults apply. Serve mode uses
+`port`, `bind` and `token` only: it ignores `retentionDays` and `backfill`, so
+it neither prunes old history nor loads recorded calls. The capture folder is
+read from the store.
 
 ## Backfill
 

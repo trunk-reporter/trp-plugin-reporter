@@ -215,11 +215,16 @@ async fn audio_streams_with_ranges_and_stays_inside_the_capture_folder() {
     let outside = capture.parent().unwrap().join(format!("outside-{}.wav", std::process::id()));
     std::fs::write(&outside, b"RIFF not yours").unwrap();
     let escape = format!("../{}", outside.file_name().unwrap().to_str().unwrap());
+    // The same file by its absolute path.
+    let c6 = s.calls[5].0;
+    let absolute = outside.to_str().unwrap().to_string();
+    assert!(std::path::Path::new(&absolute).is_absolute());
     store
         .write_sync(move |c| {
             c.execute("UPDATE calls SET audio_path = ?1 WHERE id = ?2", (wav, c1))?;
             c.execute("UPDATE calls SET audio_path = ?1 WHERE id = ?2", (m4a, c3))?;
             c.execute("UPDATE calls SET audio_path = ?1 WHERE id = ?2", (escape, c2))?;
+            c.execute("UPDATE calls SET audio_path = ?1 WHERE id = ?2", (absolute, c6))?;
             Ok(())
         })
         .unwrap();
@@ -242,6 +247,9 @@ async fn audio_streams_with_ranges_and_stays_inside_the_capture_folder() {
     let (st, _, body) = get_with(&app, &format!("/api/v1/calls/{c2}/audio"), &[]).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "not_found");
+    assert!(!String::from_utf8_lossy(&body).contains("not yours"));
+    let (st, _, body) = get_with(&app, &format!("/api/v1/calls/{c6}/audio"), &[]).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "an absolute path outside the folder");
     assert!(!String::from_utf8_lossy(&body).contains("not yours"));
     let (st, _, _) = get_with(&app, &format!("/api/v1/calls/{c4}/audio"), &[]).await;
     assert_eq!(st, StatusCode::NOT_FOUND);

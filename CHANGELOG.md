@@ -16,5 +16,5 @@ First release (phase 1).
 - Retention: "Keep history for (days)" prunes old history; 0 keeps everything.
 - Serve mode: `reporter serve <data-dir>` serves the stored history without the
   recorder.
-- Targets Trunk Recorder Pro plugin SDK 0.5. SDK 0.7 will add what 0.5 lacks
-  (system names and sites from `hello`; Task 21 in the plan).
+- Targets Trunk Recorder Pro plugin SDK 0.5. A later release moves to SDK 0.7
+  for what 0.5 lacks (system names and sites from `hello`).
