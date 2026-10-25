@@ -4,6 +4,7 @@
 mod affiliations;
 mod bus;
 mod config;
+mod ingest;
 mod plugin;
 mod store;
 

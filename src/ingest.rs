@@ -1,0 +1,700 @@
+//! TRP's plugin events → store rows and bus events.
+//!
+//! [`Ingest::handle`] runs on the plugin's message thread and never waits on
+//! the database except the first time it sees a system or site (to learn its
+//! row id). Everything else is a queued [`Store::write`] closure that owns
+//! its data and publishes its bus events once its rows are written, so bus
+//! events come out in the order the recorder sent the messages.
+// Backfill (Task 18) and the server (Task 19) use the rest.
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{Value, json};
+use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, UnitEvent};
+
+use crate::affiliations::{Affiliations, Names};
+use crate::bus::{Bus, EventKind, NewEvent};
+use crate::config::Config;
+use crate::store::calls::{NewCall, call_by_id, call_concluded, call_ended, call_started};
+use crate::store::recorder::insert_recorder_state;
+use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity};
+use crate::store::talkgroups::{TgTags, tag_talkgroup, touch_talkgroup};
+use crate::store::units::{NewUnitEvent, event_type_of, insert_unit_event, touch_unit, transmission_events};
+use crate::store::{CallId, SiteId, Store, StoreError, SystemId, now_ms};
+
+/// A call between its `call.start` and its `call.concluded` (or its unrecorded `call.end`).
+struct Live {
+    /// Set by the `call.start` write once its row exists; later writes for the
+    /// call run after it on the writer, so they find it set (unless it failed).
+    id: Arc<OnceLock<CallId>>,
+    system_id: SystemId,
+    site_id: SiteId,
+    /// Units already published as a `unit_event` (`call`) for this call.
+    units_told: HashSet<u32>,
+}
+
+pub struct Ingest {
+    store: Store,
+    bus: Bus,
+    affiliations: Affiliations,
+    host: Option<Host>,
+    capture_dir: Option<PathBuf>,
+    /// System row by short name (a system's identity) and by this run's index.
+    by_name: HashMap<String, SystemId>,
+    by_index: HashMap<u16, SystemId>,
+    sites: HashMap<(SystemId, String), SiteId>,
+    live: HashMap<(u16, u32), Live>,
+    dropped: u64,
+}
+
+/// A conventional system's events carry no site: its one site is named after the system.
+fn site_name<'a>(site: &'a str, short_name: &'a str) -> &'a str {
+    if site.is_empty() { short_name } else { site }
+}
+
+/// The record's stop time in ms (as the store reads it).
+fn record_end_ms(r: &CallRecord) -> i64 {
+    if r.stop_time_ms != 0 { r.stop_time_ms } else { r.stop_time * 1000 }
+}
+
+fn record_start_ms(r: &CallRecord) -> i64 {
+    if r.start_time_ms != 0 { r.start_time_ms } else { r.start_time * 1000 }
+}
+
+/// The bus payload for `call_*` events. Task 14 replaces it with the API's `Call`.
+fn call_json(conn: &Connection, id: CallId) -> rusqlite::Result<Option<(Value, NewEvent)>> {
+    Ok(call_by_id(conn, id)?.map(|row| {
+        let data = json!({"call_id": row.id.0, "system_id": row.system_id.0, "tgid": row.tgid, "start_ms": row.start_ms, "call_state": row.state});
+        let event = NewEvent {
+            kind: EventKind::CallStart,
+            sub_type: None,
+            system_id: Some(row.system_id.0),
+            site_id: row.site_id.map(|s| s.0),
+            tgid: Some(row.tgid),
+            unit_id: None,
+            emergency: row.emergency,
+            data: String::new(),
+        };
+        (data, event)
+    }))
+}
+
+fn publish_call(bus: &Bus, conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Result<()> {
+    if let Some((data, event)) = call_json(conn, id)? {
+        bus.publish(NewEvent { kind, data: data.to_string(), ..event });
+    }
+    Ok(())
+}
+
+/// The bus payload for `unit_event`. Task 13 replaces it with the API's `UnitEvent`.
+fn unit_event_json(_conn: &Connection, _id: i64, e: &NewUnitEvent) -> Value {
+    json!({"event_type": e.event_type, "unit_id": e.unit, "tgid": e.tgid, "system_id": e.system_id.0, "time_ms": e.time_ms})
+}
+
+fn publish_unit_event(bus: &Bus, conn: &Connection, id: i64, e: &NewUnitEvent) {
+    bus.publish(NewEvent {
+        kind: EventKind::UnitEvent,
+        sub_type: Some(e.event_type.to_string()),
+        system_id: Some(e.system_id.0),
+        site_id: e.site_id.map(|s| s.0),
+        tgid: e.tgid,
+        unit_id: Some(e.unit),
+        emergency: e.emergency,
+        data: unit_event_json(conn, id, e).to_string(),
+    });
+}
+
+/// The bus payloads for `recorder_update` and `rate_update`. Task 15 fills them.
+fn recorder_json(_conn: &Connection, _site: SiteId) -> Value {
+    json!({})
+}
+
+fn rate_json(_conn: &Connection, _site: SiteId) -> Value {
+    json!({})
+}
+
+/// The names the affiliation map shows beside an entry.
+fn names(conn: &Connection, system_id: SystemId, unit: u32, tgid: Option<u32>) -> rusqlite::Result<Names> {
+    let (system_name, sysid): (String, Option<u32>) =
+        conn.query_row("SELECT name, sysid FROM systems WHERE id = ?1", [system_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let unit_alpha_tag: String =
+        conn.query_row("SELECT alpha_tag FROM units WHERE system_id = ?1 AND unit_id = ?2", (system_id, unit), |r| r.get(0)).optional()?.unwrap_or_default();
+    let (tg_alpha_tag, tg_description, tg_tag, tg_group) = match tgid {
+        Some(tg) => conn
+            .query_row("SELECT alpha_tag, description, tag, \"group\" FROM talkgroups WHERE system_id = ?1 AND tgid = ?2", (system_id, tg), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?
+            .unwrap_or_default(),
+        None => Default::default(),
+    };
+    Ok(Names { system_name, sysid: sysid.map(|s| format!("{s:X}")).unwrap_or_default(), unit_alpha_tag, tg_alpha_tag, tg_description, tg_tag, tg_group })
+}
+
+/// Insert synthesized `call`/`end` events; feed the affiliation map with those
+/// that are new; publish a `unit_event` for each `call` event of a unit in `tell`.
+fn insert_transmission_events(
+    conn: &Connection,
+    bus: Option<&Bus>,
+    affiliations: &Affiliations,
+    events: &[NewUnitEvent],
+    tell: &mut HashSet<u32>,
+) -> rusqlite::Result<()> {
+    for e in events {
+        let Some(id) = insert_unit_event(conn, e)? else { continue };
+        affiliations.apply(e.system_id.0, e.unit, e.event_type, e.tgid, e.time_ms, names(conn, e.system_id, e.unit, e.tgid)?);
+        if let Some(bus) = bus
+            && e.event_type == "call"
+            && tell.remove(&e.unit)
+        {
+            publish_unit_event(bus, conn, id, e);
+        }
+    }
+    Ok(())
+}
+
+/// What a `call.concluded` (or a backfilled record) writes.
+struct Conclusion {
+    system_id: SystemId,
+    site_id: Option<SiteId>,
+    path: String,
+    record: CallRecord,
+    audio_path: Option<String>,
+    json_path: String,
+    /// The live call's id, when its start was seen.
+    existing: Option<Arc<OnceLock<CallId>>>,
+    /// Units to publish a `call` unit event for; `None`: publish nothing (backfill).
+    tell: Option<HashSet<u32>>,
+}
+
+impl Ingest {
+    /// Ensure a `systems` row for each of the recorder's systems.
+    pub fn new(store: Store, bus: Bus, affiliations: Affiliations, host: Option<Host>, systems: &[System<Config, NoConfig>]) -> Result<Ingest, StoreError> {
+        let declared: Vec<(u16, String, String)> = systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())).collect();
+        let now = now_ms();
+        let ids = store.write_sync(move |c| {
+            declared
+                .into_iter()
+                .map(|(index, short_name, kind)| Ok((index, ensure_system(c, &short_name, &kind, "", now)?, short_name)))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        let mut ingest = Ingest {
+            store,
+            bus,
+            affiliations,
+            host,
+            capture_dir: None,
+            by_name: HashMap::new(),
+            by_index: HashMap::new(),
+            sites: HashMap::new(),
+            live: HashMap::new(),
+            dropped: 0,
+        };
+        for (index, id, short_name) in ids {
+            ingest.by_index.insert(index, id);
+            ingest.by_name.insert(short_name, id);
+        }
+        Ok(ingest)
+    }
+
+    /// Where the recorder keeps calls: a concluded call's file paths are stored relative to it.
+    pub fn with_capture_dir(mut self, dir: PathBuf) -> Ingest {
+        self.capture_dir = Some(dir);
+        self
+    }
+
+    /// Unit events of a kind tr-engine has no type for.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn error(&self, msg: String) {
+        if let Some(h) = &self.host {
+            h.error(msg);
+        }
+    }
+
+    /// The system's row id; a system the hello didn't name is added (waiting on the store).
+    fn system(&mut self, index: Option<u16>, short_name: &str) -> Option<SystemId> {
+        if let Some(id) = self.by_name.get(short_name) {
+            return Some(*id);
+        }
+        if short_name.is_empty() {
+            if let Some(id) = index.and_then(|i| self.by_index.get(&i)) {
+                return Some(*id);
+            }
+            self.error("an event with no system, ignored".into());
+            return None;
+        }
+        let name = short_name.to_string();
+        match self.store.write_sync(move |c| ensure_system(c, &name, "", "", now_ms())) {
+            Ok(id) => {
+                self.by_name.insert(short_name.to_string(), id);
+                Some(id)
+            }
+            Err(e) => {
+                self.error(format!("could not add system {short_name}: {e}"));
+                None
+            }
+        }
+    }
+
+    /// The site's row id, added the first time it is seen (waiting on the store).
+    fn site(&mut self, system_id: SystemId, name: &str) -> Option<SiteId> {
+        let key = (system_id, name.to_string());
+        if let Some(id) = self.sites.get(&key) {
+            return Some(*id);
+        }
+        let owned = name.to_string();
+        match self.store.write_sync(move |c| ensure_site(c, system_id, &owned, now_ms())) {
+            Ok(id) => {
+                self.sites.insert(key, id);
+                Some(id)
+            }
+            Err(e) => {
+                self.error(format!("could not add site {name}: {e}"));
+                None
+            }
+        }
+    }
+
+    /// A file path as stored: relative to the capture folder when it is under it.
+    fn stored_path(&self, p: &Path) -> String {
+        match self.capture_dir.as_deref().and_then(|d| p.strip_prefix(d).ok()) {
+            Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+            None => p.to_string_lossy().into_owned(),
+        }
+    }
+
+    pub fn handle(&mut self, msg: HostMessage) {
+        match msg {
+            HostMessage::CallStart(info) => self.call_start(info),
+            HostMessage::CallEnd(info) => self.call_end(info),
+            HostMessage::CallConcluded(call) => self.call_concluded(call),
+            HostMessage::Unit(event) => self.unit(event),
+            HostMessage::Status(status) => self.status(status),
+            HostMessage::Shutdown(_) => self.store.flush(),
+            HostMessage::Hello(_) | HostMessage::Audio(_) | HostMessage::Unknown => {}
+        }
+    }
+
+    fn call_start(&mut self, info: CallInfo) {
+        let Some(system_id) = self.system(Some(info.system), &info.short_name) else { return };
+        let site = site_name(&info.site, &info.short_name).to_string();
+        let Some(site_id) = self.site(system_id, &site) else { return };
+        let cell = Arc::new(OnceLock::new());
+        let mut tell: HashSet<u32> = info.sources.iter().map(|s| s.unit).collect();
+        self.live.insert((info.system, info.id), Live { id: cell.clone(), system_id, site_id, units_told: tell.clone() });
+        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
+        self.store.write(move |c| {
+            let new = NewCall::from_info(&info, system_id, Some(site_id));
+            let id = call_started(c, &new)?;
+            let _ = cell.set(id);
+            touch_talkgroup(c, system_id, info.talkgroup, &TgTags::from_info(&info), new.start_ms, info.encrypted, info.algid)?;
+            let sources = sources_of(&info);
+            for &(unit, time_ms, _) in &sources {
+                touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
+            }
+            publish_call(&bus, c, id, EventKind::CallStart)?;
+            let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, None);
+            insert_transmission_events(c, Some(&bus), &affiliations, &events, &mut tell)
+        });
+    }
+
+    fn call_end(&mut self, info: CallInfo) {
+        let key = (info.system, info.id);
+        if !self.live.contains_key(&key) {
+            // Its start was lost (the plugin started mid-call): store it from here.
+            self.call_start(info.clone());
+        }
+        let Some(live) = self.live.get_mut(&key) else { return };
+        let mut tell: HashSet<u32> = info.sources.iter().map(|s| s.unit).filter(|u| !live.units_told.contains(u)).collect();
+        live.units_told.extend(tell.iter().copied());
+        let (cell, system_id, site_id) = (live.id.clone(), live.system_id, live.site_id);
+        let end_ms = now_ms();
+        // An unrecorded call has no `call.concluded` to come: it is over now.
+        let ended = (!info.recording).then_some(end_ms);
+        if ended.is_some() {
+            self.live.remove(&key);
+        }
+        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
+        self.store.write(move |c| {
+            let Some(&id) = cell.get() else { return Ok(()) };
+            call_ended(c, id, end_ms, &info)?;
+            let sources = sources_of(&info);
+            for &(unit, time_ms, _) in sources.iter().filter(|s| tell.contains(&s.0)) {
+                touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
+            }
+            publish_call(&bus, c, id, EventKind::CallUpdate)?;
+            let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, ended);
+            insert_transmission_events(c, Some(&bus), &affiliations, &events, &mut tell)
+        });
+    }
+
+    fn call_concluded(&mut self, call: ConcludedCall) {
+        let live = self.live.remove(&(call.system, call.call.call_num as u32));
+        let Some(system_id) = live.as_ref().map(|l| l.system_id).or_else(|| self.system(Some(call.system), &call.call.short_name)) else {
+            if let Some(h) = &self.host {
+                h.call_result(&call.path, Outcome::Failed, "its system could not be stored", "");
+            }
+            return;
+        };
+        let site_id = match &live {
+            Some(l) => Some(l.site_id),
+            None => {
+                let name = site_name(&call.call.site, &call.call.short_name).to_string();
+                self.site(system_id, &name)
+            }
+        };
+        let audio = match &call.files.m4a {
+            Some(m4a) if !call.files.wav.is_file() => m4a.clone(),
+            _ => call.files.wav.clone(),
+        };
+        let tell = match &live {
+            Some(l) => call.call.src_list.iter().map(|s| s.src as u32).filter(|u| !l.units_told.contains(u)).collect(),
+            None => call.call.src_list.iter().map(|s| s.src as u32).collect(),
+        };
+        let conclusion = Conclusion {
+            system_id,
+            site_id,
+            audio_path: (!audio.as_os_str().is_empty()).then(|| self.stored_path(&audio)),
+            json_path: self.stored_path(&call.files.json),
+            path: call.path.clone(),
+            record: call.call,
+            existing: live.map(|l| l.id),
+            tell: Some(tell),
+        };
+        self.conclude(conclusion);
+        // The plugin never holds the recorder's files: done as soon as it is queued.
+        if let Some(h) = &self.host {
+            h.call_result(&call.path, Outcome::Ok, "", "");
+        }
+    }
+
+    /// Store a call record found on disk: as `call.concluded`, with no bus events and no result.
+    pub fn backfill_record(&mut self, path: &str, record: &CallRecord, audio_path: Option<&str>, json_path: &str) {
+        let Some(system_id) = self.system(None, &record.short_name) else { return };
+        let site_id = self.site(system_id, site_name(&record.site, &record.short_name));
+        self.conclude(Conclusion {
+            system_id,
+            site_id,
+            path: path.to_string(),
+            record: record.clone(),
+            audio_path: audio_path.map(String::from),
+            json_path: json_path.to_string(),
+            existing: None,
+            tell: None,
+        });
+    }
+
+    fn conclude(&mut self, k: Conclusion) {
+        let bus = k.tell.is_some().then(|| self.bus.clone());
+        let affiliations = self.affiliations.clone();
+        self.store.write(move |c| {
+            let r = &k.record;
+            let existing = k.existing.as_ref().and_then(|cell| cell.get().copied());
+            let id = call_concluded(c, k.system_id, k.site_id, &k.path, r, k.audio_path.as_deref(), &k.json_path, existing)?;
+            let tags = TgTags::from_record(r);
+            if existing.is_some() {
+                // `call.start` counted it already.
+                tag_talkgroup(c, k.system_id, r.talkgroup, &tags)?;
+            } else {
+                let algid = u8::try_from(r.algid).ok();
+                touch_talkgroup(c, k.system_id, r.talkgroup, &tags, record_start_ms(r), r.encrypted, algid)?;
+            }
+            for s in &r.src_list {
+                touch_unit(c, k.system_id, s.src as u32, &s.tag, &s.tag_ota, s.time * 1000, Some(("call", Some(r.talkgroup))))?;
+            }
+            let sources: Vec<(u32, i64, bool)> = r.src_list.iter().map(|s| (s.src as u32, s.time * 1000, s.emergency)).collect();
+            let events = transmission_events(id, k.system_id, k.site_id, r.talkgroup, &sources, Some(record_end_ms(r)));
+            let mut tell = k.tell.unwrap_or_default();
+            insert_transmission_events(c, bus.as_ref(), &affiliations, &events, &mut tell)?;
+            if let Some(bus) = &bus {
+                publish_call(bus, c, id, EventKind::CallEnd)?;
+            }
+            Ok(())
+        });
+    }
+
+    fn unit(&mut self, event: UnitEvent) {
+        let Some((event_type, metadata)) = event_type_of(&event.kind) else {
+            self.dropped += 1;
+            return;
+        };
+        let Some(system_id) = self.system(Some(event.system), &event.short_name) else { return };
+        let site_id = self.site(system_id, site_name(&event.site, &event.short_name));
+        let e = NewUnitEvent {
+            system_id,
+            site_id,
+            unit: event.unit,
+            event_type,
+            time_ms: (event.time * 1000.0) as i64,
+            tgid: event.talkgroup,
+            emergency: event.emergency,
+            call_id: None,
+            metadata_json: metadata,
+        };
+        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
+        self.store.write(move |c| {
+            touch_unit(c, e.system_id, e.unit, "", "", e.time_ms, Some((e.event_type, e.tgid)))?;
+            if let Some(id) = insert_unit_event(c, &e)? {
+                affiliations.apply(e.system_id.0, e.unit, e.event_type, e.tgid, e.time_ms, names(c, e.system_id, e.unit, e.tgid)?);
+                publish_unit_event(&bus, c, id, &e);
+            }
+            Ok(())
+        });
+    }
+
+    fn status(&mut self, status: Status) {
+        let time_ms = (status.time * 1000.0) as i64;
+        for s in status.systems {
+            let Some(system_id) = self.system(Some(s.index), &s.short_name) else { continue };
+            let Some(site_id) = self.site(system_id, site_name(&s.site_name, &s.short_name)) else { continue };
+            let bus = self.bus.clone();
+            self.store.write(move |c| {
+                let identity =
+                    Identity { nac: s.nac, wacn: s.wacn, sys_id: s.sys_id, rfss: s.rfss, site_number: s.site, control_channel_hz: s.control_channel_hz };
+                set_identity(c, site_id, &identity, time_ms)?;
+                insert_recorder_state(c, site_id, time_ms, s.control_channel_hz, s.decode_rate, s.active_calls, s.recording)?;
+                for (kind, data) in [(EventKind::RecorderUpdate, recorder_json(c, site_id)), (EventKind::RateUpdate, rate_json(c, site_id))] {
+                    bus.publish(NewEvent {
+                        kind,
+                        sub_type: None,
+                        system_id: Some(system_id.0),
+                        site_id: Some(site_id.0),
+                        tgid: None,
+                        unit_id: None,
+                        emergency: false,
+                        data: data.to_string(),
+                    });
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+/// A call's sources as (unit, time ms, emergency).
+fn sources_of(info: &CallInfo) -> Vec<(u32, i64, bool)> {
+    info.sources.iter().map(|s| (s.unit, (s.time * 1000.0) as i64, s.emergency)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::affiliations::AffiliationFilter;
+    use crate::bus::{Event, EventKind, Filter};
+    use crate::config::Config;
+    use crate::store::systems::system_by_short_name;
+    use trunk_recorder_plugin::{CallSource, Outcome, SrcEntry, Status, SystemStatus, UnitEvent, testing};
+
+    const T0: i64 = 1_700_000_101;
+
+    fn systems() -> Vec<System<Config, NoConfig>> {
+        vec![System { index: 0, short_name: "sys1".into(), kind: "p25".into(), config: None, settings: Config::default() }]
+    }
+
+    struct Rig {
+        ingest: Ingest,
+        store: Store,
+        affiliations: Affiliations,
+        sub: crate::bus::Subscription,
+        captured: testing::Captured,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig() -> Rig {
+        let store = Store::in_memory();
+        let bus = Bus::new(100);
+        let affiliations = Affiliations::new();
+        let sub = bus.subscribe(Filter::default());
+        let (host, captured) = testing::capture();
+        let dir = testing::temp_dir("ingest");
+        let ingest = Ingest::new(store.clone(), bus, affiliations.clone(), Some(host), &systems()).unwrap().with_capture_dir(dir.clone());
+        Rig { ingest, store, affiliations, sub, captured, dir }
+    }
+
+    impl Rig {
+        fn events(&mut self) -> Vec<Event> {
+            self.store.flush();
+            let mut out = Vec::new();
+            while let Ok(e) = self.sub.rx.try_recv() {
+                out.push(e);
+            }
+            out
+        }
+
+        fn count(&self, sql: &str) -> i64 {
+            self.store.read(|c| c.query_row(sql, [], |r| r.get(0))).unwrap()
+        }
+
+        fn unit_events(&self) -> Vec<(String, u32)> {
+            self.store
+                .read(|c| {
+                    c.prepare("SELECT event_type, unit FROM unit_events ORDER BY event_type, unit")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+                })
+                .unwrap()
+        }
+    }
+
+    fn info(id: u32, sources: &[(u32, i64)], recording: bool) -> CallInfo {
+        CallInfo {
+            id,
+            system: 0,
+            short_name: "sys1".into(),
+            talkgroup: 101,
+            talkgroup_tag: "TG 101".into(),
+            freq_hz: 851_012_500,
+            recording,
+            reason: (!recording).then(|| "encrypted".to_string()),
+            encrypted: !recording,
+            start_time: T0 as f64,
+            units: sources.iter().map(|s| s.0).collect(),
+            sources: sources.iter().map(|&(unit, t)| CallSource { unit, time: t as f64, ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn kinds(events: &[Event]) -> Vec<(&'static str, Option<String>)> {
+        events.iter().map(|e| (e.kind.as_str(), e.sub_type.clone())).collect()
+    }
+
+    #[test]
+    fn a_recorded_call_is_one_row_with_its_units_and_events() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[(10, T0)], true)));
+        r.ingest.handle(HostMessage::CallEnd(info(7, &[(10, T0), (20, T0 + 2)], true)));
+        let mut cc = testing::call(&r.dir, "sys1", 101);
+        cc.call.call_num = 7;
+        cc.call.stop_time = T0 + 5;
+        cc.call.call_length = 5.0;
+        cc.call.src_list =
+            vec![SrcEntry { src: 10, time: T0, pos: 0.0, ..Default::default() }, SrcEntry { src: 20, time: T0 + 2, pos: 2.0, ..Default::default() }];
+        let path = cc.path.clone();
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        let events = r.events();
+
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 1);
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.recorded, row.call_num), ("concluded", true, Some(7)));
+        assert_eq!(row.audio_path.as_deref(), Some(format!("{path}.wav").as_str()));
+        assert_eq!(row.json_path.as_deref(), Some(format!("{path}.json").as_str()));
+        assert_eq!(r.count("SELECT count(*) FROM call_transmissions"), 2);
+        assert_eq!(r.unit_events(), vec![("call".into(), 10), ("call".into(), 20), ("end".into(), 10), ("end".into(), 20)]);
+        let end20: i64 = r.store.read(|c| c.query_row("SELECT time_ms FROM unit_events WHERE event_type = 'end' AND unit = 20", [], |x| x.get(0))).unwrap();
+        assert_eq!(end20, (T0 + 5) * 1000);
+        // The talkgroup counts the call once, though both its start and its files were seen.
+        assert_eq!(r.count("SELECT call_count FROM talkgroups WHERE tgid = 101"), 1);
+
+        assert_eq!(
+            kinds(&events),
+            vec![("call_start", None), ("unit_event", Some("call".into())), ("call_update", None), ("unit_event", Some("call".into())), ("call_end", None),]
+        );
+        assert_eq!(events[1].unit_id, Some(10));
+        assert_eq!(events[3].unit_id, Some(20));
+        let data: Value = serde_json::from_str(&events[4].data).unwrap();
+        assert_eq!((data["call_id"].as_i64(), data["call_state"].as_str(), data["tgid"].as_u64()), (Some(1), Some("concluded"), Some(101)));
+        assert_eq!(r.captured.output().results(), vec![(path, Outcome::Ok, String::new(), String::new())]);
+        assert!(r.ingest.live.is_empty());
+    }
+
+    #[test]
+    fn an_unrecorded_call_has_end_events_and_no_result() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(8, &[(10, T0)], false)));
+        r.ingest.handle(HostMessage::CallEnd(info(8, &[(10, T0)], false)));
+        let events = r.events();
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.recorded, row.not_recorded_reason.as_deref(), row.state.as_str()), (false, Some("encrypted"), "ended"));
+        assert_eq!(r.unit_events(), vec![("call".into(), 10), ("end".into(), 10)]);
+        assert_eq!(kinds(&events), vec![("call_start", None), ("unit_event", Some("call".into())), ("call_update", None)]);
+        assert!(r.captured.output().results().is_empty());
+        assert!(r.ingest.live.is_empty());
+    }
+
+    #[test]
+    fn a_concluded_call_whose_start_was_lost_is_stored() {
+        let mut r = rig();
+        let cc = testing::call(&r.dir, "sys1", 101);
+        let path = cc.path.clone();
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        let events = r.events();
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 1);
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.path.as_deref(), row.tgid, row.start_ms, row.state.as_str()), (Some(path.as_str()), 101, T0 * 1000, "concluded"));
+        assert_eq!(r.unit_events(), vec![("call".into(), 1234), ("end".into(), 1234)]);
+        assert_eq!(r.count("SELECT call_count FROM talkgroups WHERE tgid = 101"), 1);
+        assert_eq!(kinds(&events), vec![("unit_event", Some("call".into())), ("call_end", None)]);
+        assert_eq!(r.captured.output().results(), vec![(path, Outcome::Ok, String::new(), String::new())]);
+    }
+
+    #[test]
+    fn a_backfilled_record_is_stored_without_bus_events_or_results() {
+        let mut r = rig();
+        let cc = testing::call(&r.dir, "sys1", 101);
+        r.ingest.backfill_record(&cc.path, &cc.call, Some("a.wav"), "a.json");
+        let events = r.events();
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.audio_path.as_deref(), row.json_path.as_deref()), (Some("a.wav"), Some("a.json")));
+        assert_eq!(r.unit_events().len(), 2);
+        assert!(events.is_empty());
+        assert!(r.captured.output().results().is_empty());
+    }
+
+    #[test]
+    fn unit_events_map_and_feed_affiliations() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::Unit(UnitEvent {
+            system: 0,
+            short_name: "sys1".into(),
+            site: "east".into(),
+            kind: "affiliation".into(),
+            unit: 10,
+            talkgroup: Some(101),
+            time: T0 as f64,
+            ..Default::default()
+        }));
+        r.ingest.handle(HostMessage::Unit(UnitEvent { system: 0, short_name: "sys1".into(), kind: "weird".into(), unit: 11, ..Default::default() }));
+        let events = r.events();
+        assert_eq!(r.unit_events(), vec![("join".into(), 10)]);
+        assert_eq!(r.count("SELECT count(*) FROM sites WHERE name = 'east'"), 1);
+        let (entries, _, _) = r.affiliations.snapshot(&AffiliationFilter { limit: 100, ..Default::default() }, T0 * 1000);
+        assert_eq!(entries.iter().map(|e| (e.unit_id, e.tgid)).collect::<Vec<_>>(), vec![(10, 101)]);
+        assert_eq!(kinds(&events), vec![("unit_event", Some("join".into()))]);
+        assert_eq!((events[0].unit_id, events[0].tgid), (Some(10), Some(101)));
+        let data: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!((data["event_type"].as_str(), data["unit_id"].as_u64(), data["time_ms"].as_i64()), (Some("join"), Some(10), Some(T0 * 1000)));
+        assert_eq!(r.ingest.dropped(), 1);
+    }
+
+    #[test]
+    fn status_fills_identity_and_recorder_state() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::Status(Status {
+            time: T0 as f64,
+            systems: vec![SystemStatus {
+                index: 0,
+                short_name: "sys1".into(),
+                site_name: "sys1".into(),
+                control_channel_hz: Some(851_000_000),
+                decode_rate: 40.0,
+                active_calls: 2,
+                recording: 1,
+                sys_id: Some(0x3AB),
+                wacn: Some(0xBEE00),
+                ..Default::default()
+            }],
+        }));
+        let events = r.events();
+        let sys = r.store.read(|c| system_by_short_name(c, "sys1")).unwrap().unwrap();
+        assert_eq!((sys.sysid, sys.wacn), (Some(0x3AB), Some(0xBEE00)));
+        assert_eq!(r.count("SELECT count(*) FROM recorder_state"), 1);
+        assert_eq!(r.count("SELECT control_channel_hz FROM sites WHERE name = 'sys1'"), 851_000_000);
+        assert_eq!(kinds(&events), vec![("recorder_update", None), ("rate_update", None)]);
+        assert!(events.iter().all(|e| e.kind != EventKind::CallStart));
+    }
+}

@@ -64,6 +64,21 @@ pub fn touch_talkgroup(
     .map(|_| ())
 }
 
+/// Refresh the tags a call's files carry, without counting the call again
+/// (its `call.start` already did). Empty fields leave the stored value alone.
+pub fn tag_talkgroup(conn: &Connection, system_id: SystemId, tgid: u32, tags: &TgTags) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE talkgroups SET \
+         alpha_tag = CASE WHEN :alpha <> '' THEN :alpha ELSE alpha_tag END, \
+         description = CASE WHEN :desc <> '' THEN :desc ELSE description END, \
+         \"group\" = CASE WHEN :group <> '' THEN :group ELSE \"group\" END, \
+         tag = CASE WHEN :tag <> '' THEN :tag ELSE tag END \
+         WHERE system_id = :system_id AND tgid = :tgid",
+        named_params! { ":system_id": system_id, ":tgid": tgid, ":alpha": tags.alpha_tag, ":desc": tags.description, ":group": tags.group, ":tag": tags.tag },
+    )
+    .map(|_| ())
+}
+
 /// A talkgroup. The statistics and relevance are filled by [`list_talkgroups`] only;
 /// elsewhere they are 0 and `None`.
 #[derive(Clone, Debug, PartialEq)]
