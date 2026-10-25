@@ -1,5 +1,4 @@
 //! The live map of which unit is affiliated with which talkgroup.
-#![allow(dead_code)] // later tasks (ingest, the API) consume this
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};

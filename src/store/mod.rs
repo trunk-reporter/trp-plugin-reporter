@@ -1,7 +1,5 @@
 //! The SQLite store: one writer thread applies queued closures in order on the
 //! single writing connection; a small pool of other connections serves reads.
-// Later tasks use these items; until then the binary does not.
-#![allow(dead_code)]
 
 pub mod calls;
 pub mod recorder;

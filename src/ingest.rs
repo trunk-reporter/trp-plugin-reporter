@@ -6,8 +6,6 @@
 //! effects (bus events, the affiliation map, a new call's row id) happen in
 //! the write's after-commit hook, only if it committed, so bus events come
 //! out in the order the recorder sent the messages and never for rolled-back rows.
-// Backfill (Task 18) and the server (Task 19) use the rest.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

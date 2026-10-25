@@ -1,5 +1,4 @@
 //! The live event bus behind the SSE stream: a replay ring plus filtered subscribers.
-#![allow(dead_code)] // later tasks (ingest, the API) consume this
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
