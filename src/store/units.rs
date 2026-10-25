@@ -409,6 +409,11 @@ pub fn list_unit_events(conn: &Connection, f: &UnitEventFilter) -> rusqlite::Res
     Ok((rows, total))
 }
 
+/// One unit event with its display names.
+pub fn unit_event_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<UnitEventRow>> {
+    conn.query_row(&format!("{EVENT_SELECT} WHERE e.id = ?1"), [id], event_row).optional()
+}
+
 /// Affiliation-type events from `since_ms` on, oldest first.
 pub fn affiliation_events_since(conn: &Connection, since_ms: i64) -> rusqlite::Result<Vec<UnitEventRow>> {
     conn.prepare(&format!("{EVENT_SELECT} WHERE e.event_type IN ('join', 'off', 'call', 'end', 'location') AND e.time_ms >= ?1 ORDER BY e.time_ms, e.id"))?

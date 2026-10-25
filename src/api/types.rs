@@ -4,13 +4,16 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
+use crate::affiliations::AffiliationEntry;
 use crate::store::StoreError;
 use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
-use crate::store::units::UnitRow;
+use crate::store::units::{UnitEventRow, UnitRow};
 
 /// The spec's `Error`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -162,7 +165,7 @@ pub struct System {
 }
 
 /// `systems.name` when set, else the short name.
-fn display_name(row: &SystemRow) -> String {
+pub fn display_name(row: &SystemRow) -> String {
     if row.name.is_empty() { row.short_name.clone() } else { row.name.clone() }
 }
 
@@ -335,6 +338,128 @@ pub struct UnitListResponse {
     pub total: i64,
     pub limit: u32,
     pub offset: u32,
+}
+
+/// The spec's `UnitEvent`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnitEvent {
+    pub id: i64,
+    pub event_type: String,
+    pub time: String,
+    pub system_id: i64,
+    pub system_name: String,
+    pub unit_rid: u32,
+    pub unit_id: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub unit_alpha_tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tgid: Option<u32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tg_alpha_tag: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tg_description: String,
+    pub instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<Value>,
+    /// Lifted from `metadata_json` for `signal` events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signaling_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_type: Option<String>,
+}
+
+impl UnitEvent {
+    pub fn from_row(row: &UnitEventRow, instance_id: &str) -> UnitEvent {
+        let metadata: Option<Value> = row.metadata_json.as_deref().and_then(|t| serde_json::from_str(t).ok()).filter(Value::is_object);
+        let lift = |key: &str| metadata.as_ref().filter(|_| row.event_type == "signal").and_then(|m| m.get(key)).and_then(Value::as_str).map(String::from);
+        UnitEvent {
+            id: row.id,
+            event_type: row.event_type.clone(),
+            time: rfc3339(row.time_ms),
+            system_id: row.system_id.0,
+            system_name: if row.system_name.is_empty() { row.system_short_name.clone() } else { row.system_name.clone() },
+            unit_rid: row.unit,
+            unit_id: row.unit,
+            unit_alpha_tag: row.unit_alpha_tag.clone(),
+            tgid: row.tgid,
+            tg_alpha_tag: row.tg_alpha_tag.clone(),
+            tg_description: row.tg_description.clone(),
+            instance_id: instance_id.to_string(),
+            signaling_type: lift("signaling_type"),
+            signal_type: lift("signal_type"),
+            metadata_json: metadata,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct UnitEventListResponse {
+    pub events: Vec<UnitEvent>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+/// The spec's `Affiliation`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Affiliation {
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub unit_id: u32,
+    pub unit_alpha_tag: String,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub tg_description: String,
+    pub tg_tag: String,
+    pub tg_group: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_tgid: Option<u32>,
+    pub affiliated_since: String,
+    pub last_event_time: String,
+    pub status: &'static str,
+}
+
+impl Affiliation {
+    /// The system's name and sysid come from the systems table when it is known
+    /// (the map's own names may be empty after a rebuild).
+    pub fn from_entry(e: &AffiliationEntry, system: Option<&SystemRow>) -> Affiliation {
+        let sysid = match system.and_then(|s| s.sysid) {
+            Some(s) => hex(Some(s)),
+            None if !e.names.sysid.is_empty() => e.names.sysid.clone(),
+            None => hex(None),
+        };
+        Affiliation {
+            system_id: e.system_id,
+            system_name: system.map(display_name).unwrap_or_else(|| e.names.system_name.clone()),
+            sysid,
+            unit_id: e.unit_id,
+            unit_alpha_tag: e.names.unit_alpha_tag.clone(),
+            tgid: e.tgid,
+            tg_alpha_tag: e.names.tg_alpha_tag.clone(),
+            tg_description: e.names.tg_description.clone(),
+            tg_tag: e.names.tg_tag.clone(),
+            tg_group: e.names.tg_group.clone(),
+            previous_tgid: e.previous_tgid,
+            affiliated_since: rfc3339(e.affiliated_since_ms),
+            last_event_time: rfc3339(e.last_event_time_ms),
+            status: e.status,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct AffiliationSummary {
+    pub talkgroup_counts: BTreeMap<u32, i64>,
+}
+
+#[derive(Serialize)]
+pub struct AffiliationListResponse {
+    pub affiliations: Vec<Affiliation>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+    pub summary: AffiliationSummary,
 }
 
 /// The spec's `TalkgroupEncryptionStat`.

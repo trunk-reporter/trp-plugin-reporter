@@ -17,15 +17,15 @@ use crate::store::{StoreError, SystemId, now_ms};
 
 const MINUTE_MS: i64 = 60_000;
 
-type Systems = HashMap<i64, SystemRow>;
+pub(super) type Systems = HashMap<i64, SystemRow>;
 
-fn systems(conn: &Connection) -> Result<Systems, StoreError> {
+pub(super) fn systems(conn: &Connection) -> Result<Systems, StoreError> {
     Ok(list_systems(conn)?.into_iter().map(|s| (s.id.0, s)).collect())
 }
 
 /// The systems the `system_id` and `sysid` (hex) filters name; empty when no filter is given.
 /// A filter that names no system yields `[-1]`, which matches nothing.
-fn system_filter(q: &Query, systems: &Systems) -> Vec<i64> {
+pub(super) fn system_filter(q: &Query, systems: &Systems) -> Vec<i64> {
     let by_id = ids(q, &["system_id", "systems"]);
     let by_sysid = sysids(q);
     let given = !by_id.is_empty() || !by_sysid.is_empty() || ["system_id", "systems", "sysid", "sysids"].iter().any(|n| q.contains_key(*n));
@@ -65,7 +65,7 @@ pub fn resolve_talkgroup(conn: &Connection, id: &str, now_ms: i64) -> Result<Tal
     }
 }
 
-async fn blocking<T: Send + 'static>(state: &AppState, f: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static) -> Result<T, ApiError> {
+pub(super) async fn blocking<T: Send + 'static>(state: &AppState, f: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static) -> Result<T, ApiError> {
     let store = state.store.clone();
     tokio::task::spawn_blocking(move || {
         let mut result = None;

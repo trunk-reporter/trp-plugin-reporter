@@ -58,7 +58,8 @@ impl Plugin for Reporter {
         let affiliations = Affiliations::new();
         let ingest = Ingest::new(store.clone(), Bus::new(BUS_RING), affiliations.clone(), Some(host.clone()), &setup.systems)
             .map_err(|e| e.to_string())?
-            .with_capture_dir(setup.capture_dir.clone());
+            .with_capture_dir(setup.capture_dir.clone())
+            .with_host_name(&setup.host.name);
         let recent = store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?;
         affiliations.rebuild(&recent);
         host.status(State::Ok, "storing history in engine.sqlite");

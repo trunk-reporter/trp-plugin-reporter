@@ -16,13 +16,14 @@ use serde_json::{Value, json};
 use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, UnitEvent};
 
 use crate::affiliations::{Affiliations, Names};
+use crate::api::types::UnitEvent as ApiUnitEvent;
 use crate::bus::{Bus, EventKind, NewEvent};
 use crate::config::Config;
 use crate::store::calls::{CallRow, NewCall, call_by_id, call_concluded, call_ended, call_started};
 use crate::store::recorder::insert_recorder_state;
 use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity};
 use crate::store::talkgroups::{TgTags, tag_talkgroup, touch_talkgroup};
-use crate::store::units::{NewUnitEvent, event_type_of, insert_unit_event, touch_unit, transmission_events};
+use crate::store::units::{NewUnitEvent, event_type_of, insert_unit_event, touch_unit, transmission_events, unit_event_by_id};
 use crate::store::{CallId, SiteId, Store, StoreError, SystemId, now_ms};
 
 /// A call between its `call.start` and its `call.concluded` (or its unrecorded `call.end`).
@@ -42,6 +43,8 @@ pub struct Ingest {
     affiliations: Affiliations,
     host: Option<Host>,
     capture_dir: Option<PathBuf>,
+    /// The recorder's name: the `instance_id` of the events published.
+    host_name: String,
     /// System row by short name (a system's identity) and by this run's index.
     by_name: HashMap<String, SystemId>,
     by_index: HashMap<u16, SystemId>,
@@ -83,13 +86,14 @@ fn call_event(conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Resul
     }))
 }
 
-/// The bus payload for `unit_event`. Task 13 replaces it with the API's `UnitEvent`.
-fn unit_event_json(_conn: &Connection, _id: i64, e: &NewUnitEvent) -> Value {
-    json!({"event_type": e.event_type, "unit_id": e.unit, "tgid": e.tgid, "system_id": e.system_id.0, "time_ms": e.time_ms})
+/// The bus payload for `unit_event`: the API's `UnitEvent`, as stored (names and all).
+fn unit_event_json(conn: &Connection, id: i64, instance: &str) -> rusqlite::Result<Value> {
+    let row = unit_event_by_id(conn, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    Ok(serde_json::to_value(ApiUnitEvent::from_row(&row, instance)).unwrap_or_default())
 }
 
-fn unit_event(conn: &Connection, id: i64, e: &NewUnitEvent) -> NewEvent {
-    NewEvent {
+fn unit_event(conn: &Connection, id: i64, e: &NewUnitEvent, instance: &str) -> rusqlite::Result<NewEvent> {
+    Ok(NewEvent {
         kind: EventKind::UnitEvent,
         sub_type: Some(e.event_type.to_string()),
         system_id: Some(e.system_id.0),
@@ -97,8 +101,8 @@ fn unit_event(conn: &Connection, id: i64, e: &NewUnitEvent) -> NewEvent {
         tgid: e.tgid,
         unit_id: Some(e.unit),
         emergency: e.emergency,
-        data: unit_event_json(conn, id, e).to_string(),
-    }
+        data: unit_event_json(conn, id, instance)?.to_string(),
+    })
 }
 
 /// The bus payloads for `recorder_update` and `rate_update`. Task 15 fills them.
@@ -135,6 +139,8 @@ struct After {
     call: Option<(Arc<OnceLock<CallId>>, CallId)>,
     affiliations: Vec<(NewUnitEvent, Names)>,
     events: Vec<NewEvent>,
+    /// The recorder's name, for the `instance_id` of published events.
+    instance: String,
 }
 
 impl After {
@@ -155,7 +161,8 @@ fn insert_transmission_events(conn: &Connection, after: &mut After, live: bool, 
         }
         after.affiliate(conn, e);
         if e.event_type == "call" && tell.remove(&e.unit) {
-            after.events.push(unit_event(conn, id, e));
+            let event = unit_event(conn, id, e, &after.instance)?;
+            after.events.push(event);
         }
     }
     Ok(())
@@ -223,6 +230,7 @@ impl Ingest {
             affiliations,
             host,
             capture_dir: None,
+            host_name: String::new(),
             by_name: HashMap::new(),
             by_index: HashMap::new(),
             sites: HashMap::new(),
@@ -239,6 +247,12 @@ impl Ingest {
     /// Where the recorder keeps calls: a concluded call's file paths are stored relative to it.
     pub fn with_capture_dir(mut self, dir: PathBuf) -> Ingest {
         self.capture_dir = Some(dir);
+        self
+    }
+
+    /// The recorder's name, published as the `instance_id` of unit events.
+    pub fn with_host_name(mut self, name: &str) -> Ingest {
+        self.host_name = name.to_string();
         self
     }
 
@@ -299,10 +313,10 @@ impl Ingest {
 
     /// Queue a write whose side effects (`After`) happen only once it has committed.
     fn commit(&self, f: impl FnOnce(&Connection, &mut After) -> rusqlite::Result<()> + Send + 'static) {
-        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
+        let (bus, affiliations, instance) = (self.bus.clone(), self.affiliations.clone(), self.host_name.clone());
         self.store.write_then(
             move |c| {
-                let mut after = After::default();
+                let mut after = After { instance, ..Default::default() };
                 f(c, &mut after)?;
                 Ok(after)
             },
@@ -489,7 +503,8 @@ impl Ingest {
             touch_unit(c, e.system_id, e.unit, "", "", e.time_ms, Some((e.event_type, e.tgid)))?;
             if let Some(id) = insert_unit_event(c, &e)? {
                 after.affiliate(c, &e);
-                after.events.push(unit_event(c, id, &e));
+                let event = unit_event(c, id, &e, &after.instance)?;
+                after.events.push(event);
             }
             Ok(())
         });
@@ -535,6 +550,8 @@ mod tests {
     use crate::bus::{Event, EventKind, Filter};
     use crate::config::Config;
     use crate::store::systems::system_by_short_name;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
     use trunk_recorder_plugin::{CallSource, Outcome, SrcEntry, Status, SystemStatus, UnitEvent, testing};
 
     const T0: i64 = 1_700_000_101;
@@ -559,7 +576,8 @@ mod tests {
         let sub = bus.subscribe(Filter::default());
         let (host, captured) = testing::capture();
         let dir = testing::temp_dir("ingest");
-        let ingest = Ingest::new(store.clone(), bus, affiliations.clone(), Some(host), &systems()).unwrap().with_capture_dir(dir.clone());
+        let ingest =
+            Ingest::new(store.clone(), bus, affiliations.clone(), Some(host), &systems()).unwrap().with_capture_dir(dir.clone()).with_host_name("rig-host");
         Rig { ingest, store, affiliations, sub, captured, dir }
     }
 
@@ -765,7 +783,9 @@ mod tests {
         assert_eq!(kinds(&events), vec![("unit_event", Some("join".into()))]);
         assert_eq!((events[0].unit_id, events[0].tgid), (Some(10), Some(101)));
         let data: Value = serde_json::from_str(&events[0].data).unwrap();
-        assert_eq!((data["event_type"].as_str(), data["unit_id"].as_u64(), data["time_ms"].as_i64()), (Some("join"), Some(10), Some(T0 * 1000)));
+        assert_eq!((data["event_type"].as_str(), data["unit_id"].as_u64(), data["unit_rid"].as_u64()), (Some("join"), Some(10), Some(10)));
+        assert_eq!(data["time"].as_str().map(|t| OffsetDateTime::parse(t, &Rfc3339).unwrap().unix_timestamp()), Some(T0));
+        assert_eq!((data["tgid"].as_u64(), data["instance_id"].as_str()), (Some(101), Some("rig-host")));
         assert_eq!(r.ingest.dropped(), 1);
     }
 

@@ -5,6 +5,7 @@ pub mod health;
 pub mod systems;
 pub mod talkgroups;
 pub mod types;
+pub mod units;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,16 +117,11 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/talkgroup-directory",
     "/talkgroup-directory/import",
     "/unit-tags/import",
-    "/units",
-    "/units/{id}",
     "/units/{id}/calls",
-    "/units/{id}/events",
     "/unit-tag-suggestions",
     "/unit-tag-suggestions/{id}",
     "/unit-tag-suggestions/{id}/approve",
     "/unit-tag-suggestions/{id}/dismiss",
-    "/unit-events",
-    "/unit-affiliations",
     "/calls",
     "/calls/active",
     "/calls/{id}",
@@ -187,7 +183,12 @@ pub fn router(state: AppState) -> Router {
         .route("/talkgroups", get(talkgroups::list))
         .route("/talkgroups/encryption-stats", get(talkgroups::encryption_stats))
         .route("/talkgroups/{id}", get(talkgroups::one).patch(not_implemented))
-        .route("/talkgroups/{id}/units", get(talkgroups::units));
+        .route("/talkgroups/{id}/units", get(talkgroups::units))
+        .route("/units", get(units::list))
+        .route("/units/{id}", get(units::one).patch(not_implemented))
+        .route("/units/{id}/events", get(units::events))
+        .route("/unit-events", get(units::unit_events))
+        .route("/unit-affiliations", get(units::affiliations));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }
