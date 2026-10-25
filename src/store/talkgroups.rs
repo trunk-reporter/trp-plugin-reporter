@@ -164,6 +164,11 @@ pub fn talkgroups_by_tgid(conn: &Connection, tgid: u32, now_ms: i64) -> rusqlite
     conn.prepare(&sql)?.query_map(params_from_iter([h1, h24, d30, Value::Integer(tgid as i64)]), talkgroup_row)?.collect()
 }
 
+/// The alpha tag of a talkgroup, when the store knows it.
+pub fn tg_alpha_tag(conn: &Connection, system_id: SystemId, tgid: u32) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT alpha_tag FROM talkgroups WHERE system_id = ?1 AND tgid = ?2", (system_id, tgid), |r| r.get(0)).optional()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TgSort {
     AlphaTag,

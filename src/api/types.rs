@@ -9,6 +9,8 @@ use time::macros::format_description;
 
 use crate::store::StoreError;
 use crate::store::systems::{SiteRow, SystemRow};
+use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
+use crate::store::units::UnitRow;
 
 /// The spec's `Error`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -215,6 +217,164 @@ pub struct SystemListResponse {
 pub struct P25SystemListResponse {
     pub systems: Vec<P25System>,
     pub total: usize,
+}
+
+/// The spec's `Talkgroup`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Talkgroup {
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub tgid: u32,
+    pub alpha_tag: String,
+    pub tag: String,
+    pub group: String,
+    pub description: String,
+    /// `"E"` when any call was encrypted, else `"D"`.
+    pub mode: &'static str,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub call_count: i64,
+    pub calls_1h: i64,
+    pub calls_24h: i64,
+    pub unit_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relevance_score: Option<i64>,
+}
+
+impl Talkgroup {
+    pub fn from_rows(row: &TalkgroupRow, system: Option<&SystemRow>) -> Talkgroup {
+        Talkgroup {
+            system_id: row.system_id.0,
+            system_name: system.map(display_name).unwrap_or_default(),
+            sysid: hex(system.and_then(|s| s.sysid)),
+            tgid: row.tgid,
+            alpha_tag: row.alpha_tag.clone(),
+            tag: row.tag.clone(),
+            group: row.group.clone(),
+            description: row.description.clone(),
+            mode: if row.encrypted_count > 0 { "E" } else { "D" },
+            first_seen: rfc3339(row.first_heard_ms),
+            last_seen: rfc3339(row.last_heard_ms),
+            call_count: row.call_count_30d,
+            calls_1h: row.calls_1h,
+            calls_24h: row.calls_24h,
+            unit_count: row.unit_count_30d,
+            relevance_score: row.relevance_score,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct TalkgroupListResponse {
+    pub talkgroups: Vec<Talkgroup>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+/// The spec's `Unit`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Unit {
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub unit_id: u32,
+    pub alpha_tag: String,
+    /// `"csv"` when the store says `recorder` and the tag is not empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha_tag_source: Option<&'static str>,
+    pub first_seen: String,
+    pub last_seen: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_tgid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_tg_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorder_alpha_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ota_alpha_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relevance_score: Option<i64>,
+}
+
+impl Unit {
+    /// `last_event_tg_tag` is the alpha tag of the talkgroup of the last event, when known.
+    pub fn from_rows(row: &UnitRow, system: Option<&SystemRow>, last_event_tg_tag: Option<String>, call_count: Option<i64>) -> Unit {
+        let tagged = !row.alpha_tag.is_empty();
+        Unit {
+            system_id: row.system_id.0,
+            system_name: system.map(display_name).unwrap_or_default(),
+            sysid: hex(system.and_then(|s| s.sysid)),
+            unit_id: row.unit_id,
+            alpha_tag: row.alpha_tag.clone(),
+            alpha_tag_source: (tagged && row.alpha_tag_source == "recorder").then_some("csv"),
+            first_seen: rfc3339(row.first_seen_ms),
+            last_seen: rfc3339(row.last_seen_ms),
+            last_event_type: row.last_event_type.clone(),
+            last_event_time: row.last_event_ms.map(rfc3339),
+            last_event_tgid: row.last_event_tgid,
+            last_event_tg_tag: last_event_tg_tag.filter(|t| !t.is_empty()),
+            recorder_alpha_tag: (tagged && row.alpha_tag_source == "recorder").then(|| row.alpha_tag.clone()),
+            ota_alpha_tag: Some(row.ota_alpha_tag.clone()).filter(|t| !t.is_empty()),
+            call_count,
+            relevance_score: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct UnitListResponse {
+    pub units: Vec<Unit>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+/// The spec's `TalkgroupEncryptionStat`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EncryptionStat {
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub tg_description: String,
+    pub encrypted_count: i64,
+    pub clear_count: i64,
+    pub total_count: i64,
+    pub encrypted_pct: f64,
+}
+
+impl EncryptionStat {
+    pub fn from_rows(row: &EncryptionStatRow, system: Option<&SystemRow>) -> EncryptionStat {
+        let total = row.encrypted_calls + row.clear_calls;
+        EncryptionStat {
+            system_id: row.system_id.0,
+            system_name: system.map(display_name).unwrap_or_default(),
+            sysid: hex(system.and_then(|s| s.sysid)),
+            tgid: row.tgid,
+            tg_alpha_tag: row.alpha_tag.clone(),
+            tg_description: row.description.clone(),
+            encrypted_count: row.encrypted_calls,
+            clear_count: row.clear_calls,
+            total_count: total,
+            encrypted_pct: if total == 0 { 0.0 } else { row.encrypted_calls as f64 * 100.0 / total as f64 },
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct EncryptionStatsResponse {
+    pub stats: Vec<EncryptionStat>,
+    pub total: usize,
+    pub hours: i64,
 }
 
 #[cfg(test)]
