@@ -2,6 +2,7 @@
 //! guard, and the query-parameter rules every endpoint shares.
 
 pub mod health;
+pub mod systems;
 pub mod types;
 
 use std::collections::HashMap;
@@ -110,10 +111,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/auth/keys/{id}/any",
     "/users",
     "/users/{id}",
-    "/systems",
-    "/systems/{id}",
-    "/sites/{id}",
-    "/p25-systems",
     "/talkgroups",
     "/talkgroups/{id}",
     "/talkgroups/{id}/calls",
@@ -185,7 +182,11 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/auth-init", get(health::auth_init))
         .route("/openapi.yaml", get(health::openapi))
-        .route("/pages", get(health::pages).post(not_implemented));
+        .route("/pages", get(health::pages).post(not_implemented))
+        .route("/systems", get(systems::list))
+        .route("/systems/{id}", get(systems::one).patch(not_implemented))
+        .route("/sites/{id}", get(systems::site).patch(not_implemented))
+        .route("/p25-systems", get(systems::p25));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }

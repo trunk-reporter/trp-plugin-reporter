@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 use crate::store::StoreError;
+use crate::store::systems::{SiteRow, SystemRow};
 
 /// The spec's `Error`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -100,6 +101,120 @@ pub fn rfc3339(ms: i64) -> String {
 /// A P25 identity (sysid, wacn, nac) as the spec writes it: upper-case hex, `"0"` when unknown.
 pub fn hex(v: Option<u32>) -> String {
     format!("{:X}", v.unwrap_or(0))
+}
+
+/// The spec's `SystemType` for a stored `kind`.
+pub fn system_type(kind: &str) -> &'static str {
+    match kind {
+        "p25" => "p25",
+        "smartnet" => "smartnet",
+        "dmr" => "dmr",
+        "nxdn" => "nxdn",
+        "edacs" => "edacs",
+        _ => "conventional",
+    }
+}
+
+/// The spec's `Site`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Site {
+    pub site_id: i64,
+    pub system_id: i64,
+    pub short_name: String,
+    pub instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nac: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rfss: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p25_site_id: Option<i64>,
+    /// Never known to the plugin, so never served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sys_num: Option<i64>,
+}
+
+impl Site {
+    pub fn from_row(row: &SiteRow, instance_id: &str) -> Site {
+        Site {
+            site_id: row.id.0,
+            system_id: row.system_id.0,
+            short_name: row.name.clone(),
+            instance_id: instance_id.to_string(),
+            nac: row.nac.map(|n| hex(Some(n))),
+            rfss: row.rfss.map(i64::from),
+            p25_site_id: row.site_number.map(i64::from),
+            sys_num: None,
+        }
+    }
+}
+
+/// The spec's `System`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct System {
+    pub system_id: i64,
+    pub system_type: &'static str,
+    pub name: String,
+    pub sysid: String,
+    pub wacn: String,
+    pub sites: Vec<Site>,
+}
+
+/// `systems.name` when set, else the short name.
+fn display_name(row: &SystemRow) -> String {
+    if row.name.is_empty() { row.short_name.clone() } else { row.name.clone() }
+}
+
+impl System {
+    pub fn from_rows(row: &SystemRow, sites: Vec<SiteRow>, instance_id: &str) -> System {
+        System {
+            system_id: row.id.0,
+            system_type: system_type(&row.kind),
+            name: display_name(row),
+            sysid: hex(row.sysid),
+            wacn: hex(row.wacn),
+            sites: sites.iter().map(|s| Site::from_row(s, instance_id)).collect(),
+        }
+    }
+}
+
+/// The spec's `P25System`: a system with its sites and counts.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct P25System {
+    pub system_id: i64,
+    pub name: String,
+    pub sysid: String,
+    pub wacn: String,
+    pub sites: Vec<Site>,
+    pub talkgroup_count: i64,
+    pub unit_count: i64,
+    pub calls_24h: i64,
+}
+
+impl P25System {
+    pub fn from_system(system: System, (talkgroup_count, unit_count, calls_24h): (i64, i64, i64)) -> P25System {
+        P25System {
+            system_id: system.system_id,
+            name: system.name,
+            sysid: system.sysid,
+            wacn: system.wacn,
+            sites: system.sites,
+            talkgroup_count,
+            unit_count,
+            calls_24h,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SystemListResponse {
+    pub systems: Vec<System>,
+    pub total: usize,
+}
+
+#[derive(Serialize)]
+pub struct P25SystemListResponse {
+    pub systems: Vec<P25System>,
+    pub total: usize,
 }
 
 #[cfg(test)]

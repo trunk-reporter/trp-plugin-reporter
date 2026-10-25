@@ -136,6 +136,16 @@ pub fn site_by_id(conn: &Connection, id: SiteId) -> rusqlite::Result<Option<Site
     conn.query_row(&format!("SELECT {SITE_COLS} FROM sites WHERE id = ?1"), [id], site_row).optional()
 }
 
+/// A system's (talkgroup count, unit count, calls started in the 24 h before `now_ms`).
+pub fn system_counts(conn: &Connection, system: SystemId, now_ms: i64) -> rusqlite::Result<(i64, i64, i64)> {
+    let count = |sql: &str, params: &[&dyn rusqlite::ToSql]| conn.query_row(sql, params, |r| r.get::<_, i64>(0));
+    Ok((
+        count("SELECT COUNT(*) FROM talkgroups WHERE system_id = ?1", &[&system])?,
+        count("SELECT COUNT(*) FROM units WHERE system_id = ?1", &[&system])?,
+        count("SELECT COUNT(*) FROM calls WHERE system_id = ?1 AND start_ms > ?2", &[&system, &(now_ms - 86_400_000)])?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
