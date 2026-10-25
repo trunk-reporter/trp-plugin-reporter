@@ -8,5 +8,6 @@ pub mod bus;
 pub mod config;
 pub mod ingest;
 pub mod plugin;
+pub mod server;
 pub mod store;
 pub mod web;

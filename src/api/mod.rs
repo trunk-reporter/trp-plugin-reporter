@@ -82,7 +82,13 @@ pub struct AppState {
     pub pages: Arc<Pages>,
     /// How often an idle event stream gets a keepalive comment.
     pub keepalive: Duration,
+    /// Where an internal error's (a 500's) message goes: the recorder's log,
+    /// stderr in `serve` mode; nowhere by default.
+    pub log: Log,
 }
+
+/// A sink for messages an operator should see.
+pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
 impl AppState {
     /// Started now, this crate's version, the embedded pages. An empty token is no token.
@@ -98,6 +104,7 @@ impl AppState {
             host,
             pages: Arc::new(Pages::scan()),
             keepalive: sse::KEEPALIVE,
+            log: Arc::new(|_| {}),
         }
     }
 }
@@ -223,6 +230,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(web::index))
         .fallback_service(get(web::file))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .layer(middleware::from_fn_with_state(state.clone(), log_internal))
         .with_state(state)
 }
 
@@ -233,6 +241,16 @@ async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {
 /// Unrouted paths. The `"no endpoint "` prefix tells this 404 from a handler's (a missing row).
 async fn not_found(method: Method, OriginalUri(uri): OriginalUri) -> ApiError {
     ApiError::NotFound(format!("no endpoint {method} {}", uri.path()))
+}
+
+/// A 500's message (kept out of its body) goes to [`AppState::log`].
+async fn log_internal(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let res = next.run(req).await;
+    if let Some(types::InternalMessage(m)) = res.extensions().get::<types::InternalMessage>() {
+        (state.log)(format!("{path}: {m}"));
+    }
+    res
 }
 
 /// Equal, in time that depends only on the lengths.
@@ -345,6 +363,25 @@ mod tests {
 
     fn q(pairs: &[(&str, &str)]) -> Query {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[tokio::test]
+    async fn an_internal_error_is_logged_not_shown() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut state = AppState::new(Store::in_memory(), Bus::new(10), Affiliations::new(), std::env::temp_dir(), None, HostStatus::new("t", true));
+        let sink = seen.clone();
+        state.log = Arc::new(move |m| sink.lock().unwrap().push(m));
+        let app = Router::new()
+            .route("/boom", get(|| async { ApiError::Internal("no such table: calls".into()) }))
+            .layer(middleware::from_fn_with_state(state.clone(), log_internal))
+            .with_state(state);
+        let res = app.oneshot(axum::http::Request::get("/boom").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = http_body_util::BodyExt::collect(res.into_body()).await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&body).contains("no such table"));
+        assert_eq!(*seen.lock().unwrap(), vec!["/boom: no such table: calls".to_string()]);
     }
 
     #[test]

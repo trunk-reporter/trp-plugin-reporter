@@ -1,8 +1,8 @@
 //! The `reporter` executable: picks a mode from the command line and runs it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use reporter::plugin;
+use reporter::{plugin, server};
 
 /// What the command line asks for.
 #[derive(Debug)]
@@ -36,15 +36,29 @@ fn main() {
         Ok(Mode::Plugin) => trunk_recorder_plugin::run::<plugin::Reporter>(),
         Ok(Mode::Describe) => println!("{}", serde_json::to_string_pretty(&trunk_recorder_plugin::describe::<plugin::Reporter>()).unwrap_or_default()),
         Ok(Mode::Version) => println!("{}", <plugin::Reporter as trunk_recorder_plugin::Plugin>::manifest().version),
-        Ok(Mode::Serve { .. }) => {
-            eprintln!("not built yet");
-            std::process::exit(2);
-        }
+        Ok(Mode::Serve { data_dir }) => serve(&data_dir),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     }
+}
+
+/// `serve <data dir>`: serve the folder's history until Ctrl-C.
+fn serve(data_dir: &Path) {
+    let server = match server::serve_data_dir(data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!("serving at {} (Ctrl-C stops)", server.url());
+    let waited = tokio::runtime::Builder::new_current_thread().enable_all().build().map(|rt| rt.block_on(tokio::signal::ctrl_c()));
+    if let Err(e) | Ok(Err(e)) = waited {
+        eprintln!("cannot wait for Ctrl-C: {e}");
+    }
+    server.stop();
 }
 
 #[cfg(test)]

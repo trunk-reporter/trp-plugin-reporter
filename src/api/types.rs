@@ -66,6 +66,10 @@ pub enum ApiError {
     Internal(String),
 }
 
+/// An [`ApiError::Internal`]'s message, carried on its response to the router's log layer.
+#[derive(Clone, Debug)]
+pub struct InternalMessage(pub String);
+
 impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         ApiError::Internal(e.0)
@@ -97,8 +101,13 @@ impl IntoResponse for ApiError {
             ApiError::NotImplemented(path) => {
                 ApiError::error(StatusCode::NOT_IMPLEMENTED, "not_implemented", "not available in the Trunk Recorder Pro plugin", path)
             }
-            // The store's message (SQL text) stays out of the response.
-            ApiError::Internal(_) => ApiError::error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error", ""),
+            // The store's message (SQL text) stays out of the body; the router's
+            // log layer reports it from the extension.
+            ApiError::Internal(m) => {
+                let mut res = ApiError::error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error", "");
+                res.extensions_mut().insert(InternalMessage(m));
+                res
+            }
         }
     }
 }

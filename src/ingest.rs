@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -50,7 +51,7 @@ pub struct Ingest {
     by_index: HashMap<u16, SystemId>,
     sites: HashMap<(SystemId, String), SiteId>,
     live: HashMap<(u16, u32), Live>,
-    dropped: u64,
+    dropped: Arc<AtomicU64>,
 }
 
 /// A conventional system's events carry no site: its one site is named after the system.
@@ -233,7 +234,7 @@ impl Ingest {
             by_index: HashMap::new(),
             sites: HashMap::new(),
             live: HashMap::new(),
-            dropped: 0,
+            dropped: Arc::new(AtomicU64::new(0)),
         };
         for (index, id, short_name) in ids {
             ingest.by_index.insert(index, id);
@@ -264,7 +265,12 @@ impl Ingest {
 
     /// Unit events of a kind tr-engine has no type for.
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The [`Ingest::dropped`] count, readable from another thread.
+    pub fn dropped_counter(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
     }
 
     fn error(&self, msg: String) {
@@ -489,7 +495,7 @@ impl Ingest {
 
     fn unit(&mut self, event: UnitEvent) {
         let Some((event_type, metadata)) = event_type_of(&event.kind) else {
-            self.dropped += 1;
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
         let Some(system_id) = self.system(Some(event.system), &event.short_name) else { return };
