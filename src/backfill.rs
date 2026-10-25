@@ -2,6 +2,7 @@
 //! store does not have yet.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use time::OffsetDateTime;
 use trunk_recorder_plugin::CallRecord;
@@ -10,6 +11,11 @@ use walkdir::WalkDir;
 use crate::ingest::{Ingest, stored_path};
 use crate::store::SystemId;
 use crate::store::calls::{newest_start_ms, path_exists};
+use crate::store::systems::{meta_get, meta_set};
+
+/// `meta` key written once a walk has covered every system's folders: until
+/// then, older day folders are walked too (an interrupted walk resumes).
+pub const COMPLETE_KEY: &str = "backfill_complete";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BackfillReport {
@@ -39,12 +45,16 @@ fn read_record(path: &Path) -> Result<CallRecord, String> {
 }
 
 /// Ingest the call files under `capture_dir/<short_name>/<Y>/<M>/<D>/` that the
-/// store lacks, skipping day folders older than the day before each system's
-/// newest stored call. `progress` gets the file count every 100 files.
-pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, String)], progress: &mut dyn FnMut(u64)) -> BackfillReport {
+/// store lacks. Once a walk has finished ([`COMPLETE_KEY`]), day folders older
+/// than the day before each system's newest stored call are skipped.
+/// `progress` gets the file count every 100 files. A set `stop` ends the walk
+/// early, without marking it complete.
+pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, String)], progress: &mut dyn FnMut(u64), stop: &AtomicBool) -> BackfillReport {
     let mut report = BackfillReport::default();
+    let stopped = || stop.load(Ordering::Relaxed);
+    let completed_before = ingest.store().read(|c| meta_get(c, COMPLETE_KEY)).ok().flatten().is_some();
     for (system, short_name) in systems {
-        let newest = ingest.store().read(|c| newest_start_ms(c, *system)).ok().flatten();
+        let newest = if completed_before { ingest.store().read(|c| newest_start_ms(c, *system)).ok().flatten() } else { None };
         // One day of slack: a call near midnight may sit in the next folder.
         let cutoff = newest.and_then(|ms| day_of_ms(ms - 86_400_000));
         let root = capture_dir.join(short_name);
@@ -59,7 +69,13 @@ pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, S
             .filter(|(day, _)| cutoff.is_none_or(|c| *day >= c))
             .collect();
         for (_, dir) in days {
+            if stopped() {
+                return report;
+            }
             for entry in WalkDir::new(&dir).min_depth(1).max_depth(1).sort_by_file_name().into_iter().filter_map(Result::ok) {
+                if stopped() {
+                    return report;
+                }
                 let path = entry.path();
                 if !entry.file_type().is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
@@ -89,6 +105,12 @@ pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, S
                 report.ingested += 1;
             }
         }
+    }
+    // Queued after every record above, so it commits only once they have.
+    if let Err(e) = ingest.store().write_sync(|c| meta_set(c, COMPLETE_KEY, "1"))
+        && let Some(h) = ingest.host()
+    {
+        h.warn(format!("backfill: could not mark the walk complete: {e}"));
     }
     report
 }
@@ -126,10 +148,10 @@ mod tests {
         testing::call(&dir, "sys1", 101);
         testing::call(&dir, "sys1", 102);
         let systems = systems_of(&store);
-        let first = backfill(&mut ingest, &dir, &systems, &mut |_| {});
+        let first = backfill(&mut ingest, &dir, &systems, &mut |_| {}, &AtomicBool::new(false));
         store.flush();
         assert_eq!(first, BackfillReport { files: 2, ingested: 2, skipped_known: 0, bad: 0 });
-        let second = backfill(&mut ingest, &dir, &systems, &mut |_| {});
+        let second = backfill(&mut ingest, &dir, &systems, &mut |_| {}, &AtomicBool::new(false));
         store.flush();
         assert_eq!(second, BackfillReport { files: 2, ingested: 0, skipped_known: 2, bad: 0 });
         assert_eq!(count(&store), 2);
@@ -147,30 +169,57 @@ mod tests {
         let cc = testing::call(&dir, "sys1", 101);
         let day = dir.join(&cc.path).parent().unwrap().to_path_buf();
         std::fs::write(day.join("999-1_1.json"), "{not json").unwrap();
-        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {});
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {}, &AtomicBool::new(false));
         store.flush();
         assert_eq!(r, BackfillReport { files: 2, ingested: 1, skipped_known: 0, bad: 1 });
         assert_eq!(count(&store), 1);
         drop(captured);
     }
 
-    #[test]
-    fn day_folders_older_than_the_store_are_not_walked() {
-        let (mut ingest, store, dir, _) = rig("backfill3");
-        // A stored call on 2023-11-20 (not on disk).
+    /// A stored call on 2023-11-20 (not on disk); on disk, 2023-11-14 (an
+    /// older day folder) and 2023-11-21.
+    fn older_folder_rig(tag: &str) -> (Ingest, Store, std::path::PathBuf) {
+        let (mut ingest, store, dir, _) = rig(tag);
         let cc = testing::call(&dir, "sys1", 101);
         let mut stored: CallRecord = cc.call.clone();
         stored.start_time = 1_700_481_600;
         stored.stop_time = 1_700_481_603;
         ingest.backfill_record("sys1/2023/11/20/x", &stored, None, "sys1/2023/11/20/x.json");
         store.flush();
-        // On disk: 2023-11-14 (the call above) and 2023-11-21.
         let later = dir.join("sys1").join("2023").join("11").join("21");
         std::fs::create_dir_all(&later).unwrap();
         std::fs::write(later.join("102-1700568000_1.json"), serde_json::to_string(&stored).unwrap()).unwrap();
+        (ingest, store, dir)
+    }
+
+    fn completed(store: &Store) -> bool {
+        store.read(|c| meta_get(c, COMPLETE_KEY)).unwrap().is_some()
+    }
+
+    #[test]
+    fn day_folders_older_than_the_store_are_not_walked() {
+        let (mut ingest, store, dir) = older_folder_rig("backfill3");
+        store.write_sync(|c| meta_set(c, COMPLETE_KEY, "1")).unwrap();
         let mut ticks = Vec::new();
-        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |n| ticks.push(n));
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |n| ticks.push(n), &AtomicBool::new(false));
         assert_eq!(r.files, 1);
         assert!(ticks.is_empty());
+    }
+
+    #[test]
+    fn until_a_walk_completes_older_day_folders_are_walked_too() {
+        let (mut ingest, store, dir) = older_folder_rig("backfill4");
+        assert!(!completed(&store));
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {}, &AtomicBool::new(false));
+        assert_eq!((r.files, r.ingested), (2, 2));
+        assert!(completed(&store));
+    }
+
+    #[test]
+    fn a_stopped_walk_is_not_marked_complete() {
+        let (mut ingest, store, dir) = older_folder_rig("backfill5");
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {}, &AtomicBool::new(true));
+        assert_eq!(r.files, 0);
+        assert!(!completed(&store));
     }
 }

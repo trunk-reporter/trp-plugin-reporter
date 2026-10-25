@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -39,6 +39,8 @@ pub struct Reporter {
     host_status: HostStatus,
     server: Option<ServerHandle>,
     maintenance: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
+    /// Set at shutdown: a backfill still walking stops (and stays incomplete).
+    stop_backfill: Arc<AtomicBool>,
 }
 
 fn calls_stored(store: &Store) -> i64 {
@@ -169,24 +171,34 @@ impl Plugin for Reporter {
             host.info(format!("serving tr-engine's API and pages at {url}"));
         }
 
+        let stop_backfill = Arc::new(AtomicBool::new(false));
         // The status is set before the backfill starts, so its own (the
         // last word once it ends) cannot be overwritten by this one.
         if config.backfill {
             host.status(State::Warning, "backfilling: 0 calls");
             let mut walker = new_ingest()?;
             let systems: Vec<_> = store.read(list_systems).map_err(|e| e.to_string())?.into_iter().map(|s| (s.id, s.short_name)).collect();
-            let (host, store, capture_dir, serving) = (host.clone(), store.clone(), setup.capture_dir.clone(), serving.clone());
+            let (host, store, capture_dir, serving, stop) = (host.clone(), store.clone(), setup.capture_dir.clone(), serving.clone(), stop_backfill.clone());
             std::thread::Builder::new()
                 .name("backfill".into())
                 .spawn(move || {
                     let mut told = Instant::now();
-                    let report = backfill(&mut walker, &capture_dir, &systems, &mut |n| {
-                        if told.elapsed() >= Duration::from_secs(1) {
-                            told = Instant::now();
-                            host.status(State::Warning, format!("backfilling: {n} calls"));
-                        }
-                    });
+                    let report = backfill(
+                        &mut walker,
+                        &capture_dir,
+                        &systems,
+                        &mut |n| {
+                            if told.elapsed() >= Duration::from_secs(1) {
+                                told = Instant::now();
+                                host.status(State::Warning, format!("backfilling: {n} calls"));
+                            }
+                        },
+                        &stop,
+                    );
                     store.flush();
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if report.ingested > 0 || report.bad > 0 {
                         host.info(format!(
                             "backfill: {} calls added from {} files ({} already stored, {} unreadable)",
@@ -201,7 +213,7 @@ impl Plugin for Reporter {
         }
 
         let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days)?;
-        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance) })
+        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill })
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -225,11 +237,12 @@ impl Plugin for Reporter {
         self.ingest.handle(HostMessage::Status(status));
     }
 
-    /// Maintenance, then the server (at most 2 s of `grace`), then every
+    /// A running backfill is told to stop, then maintenance, then the server (at most 2 s of `grace`), then every
     /// queued write. The flush runs even when the grace is spent: the
     /// history matters more than the deadline.
     fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
+        self.stop_backfill.store(true, Ordering::Relaxed);
         if let Some((stop, thread)) = self.maintenance.take() {
             let _ = stop.send(());
             let _ = thread.join();
@@ -317,6 +330,8 @@ mod tests {
         }
         assert_eq!(captured.output().status(), Some((State::Ok, "not serving (Port is 0) · 2 calls stored".into())));
         assert!(captured.output().logs().iter().any(|(_, m)| m.contains("backfill: 2 calls added from 2 files")));
+        let mark = crate::store::systems::meta_get;
+        assert_eq!(plugin.store.read(|c| mark(c, crate::backfill::COMPLETE_KEY)).unwrap().as_deref(), Some("1"));
         plugin.shutdown(Duration::from_secs(1));
     }
 
