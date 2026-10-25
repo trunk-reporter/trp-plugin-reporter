@@ -1,0 +1,107 @@
+diff --git a/openapi.yaml b/openapi.yaml
+index 56cccc3..8c246c3 100644
+--- a/openapi.yaml
++++ b/openapi.yaml
+@@ -972,6 +972,7 @@ paths:
+         - $ref: "#/components/parameters/talkgroupId"
+         - $ref: "#/components/parameters/startTime"
+         - $ref: "#/components/parameters/endTime"
++        - $ref: "#/components/parameters/recorded"
+         - $ref: "#/components/parameters/limit"
+         - $ref: "#/components/parameters/offset"
+       responses:
+@@ -1417,6 +1418,7 @@ paths:
+         - $ref: "#/components/parameters/unitId"
+         - $ref: "#/components/parameters/startTime"
+         - $ref: "#/components/parameters/endTime"
++        - $ref: "#/components/parameters/recorded"
+         - $ref: "#/components/parameters/limit"
+         - $ref: "#/components/parameters/offset"
+       responses:
+@@ -1859,6 +1861,7 @@ paths:
+             default: false
+         - $ref: "#/components/parameters/startTime"
+         - $ref: "#/components/parameters/endTime"
++        - $ref: "#/components/parameters/recorded"
+         - name: sort
+           in: query
+           description: |
+@@ -4133,6 +4136,13 @@ components:
+         type: string
+         format: date-time
+ 
++    recorded:
++      name: recorded
++      in: query
++      description: Filter by whether audio was recorded. Unset returns both.
++      schema:
++        type: boolean
++
+     limit:
+       name: limit
+       in: query
+@@ -4247,11 +4257,13 @@ components:
+ 
+     SystemType:
+       type: string
+-      enum: [p25, smartnet, conventional, conventionalP25, conventionalDMR, conventionalSIGMF]
++      enum: [p25, smartnet, dmr, nxdn, edacs, conventional, conventionalP25, conventionalDMR, conventionalSIGMF]
+       description: |
+         Radio system protocol type. The conventional variants indicate
+         conventional monitoring of digital channels (P25, DMR) or SigMF
+         recording sources, as opposed to pure analog conventional.
++        The dmr, nxdn and edacs types are trunked systems of those kinds;
++        conventionalDMR is conventional DMR.
+ 
+     TalkgroupMode:
+       type: string
+@@ -4408,6 +4420,7 @@ components:
+             - ambiguous_id
+             - duplicate
+             - request_timeout
++            - not_implemented
+         error:
+           type: string
+           example: Resource not found
+@@ -4889,6 +4902,41 @@ components:
+           type: integer
+           description: "TDMA slot (0=slot 1 or N/A, 1=slot 2)"
+           example: 0
++        recorded:
++          type: boolean
++          description: Whether audio was recorded; false for calls the recorder only followed (encrypted, no recorder free, talkgroup not in the list, ...). Engines that never see unrecorded calls always send true.
++          example: true
++        not_recorded_reason:
++          type: string
++          nullable: true
++          description: Why audio was not recorded, when recorded is false; null otherwise. Values Trunk Recorder Pro produces include encrypted, unknown_tg, no_recorder, no_source.
++          example: null
++        decrypted:
++          type: boolean
++          description: Some encrypted voice was decrypted (the system had the key)
++          example: false
++        algid:
++          type: integer
++          nullable: true
++          description: P25 encryption algorithm ID the voice named (0x84 AES-256, 0xAA ADP, ...); null when none heard
++          example: null
++        key_id:
++          type: integer
++          nullable: true
++          description: P25 key ID; null when none heard
++          example: null
++        priority:
++          type: integer
++          description: "P25 service-option priority as the grant said: 1 lowest, 4 default, 7 highest, 0 not given"
++          example: 4
++        duplex:
++          type: boolean
++          description: Full duplex, as the grant said
++          example: false
++        packet:
++          type: boolean
++          description: Packet mode (circuit otherwise), as the grant said
++          example: false
+ 
+         # Patches
+         patched_tgids:
