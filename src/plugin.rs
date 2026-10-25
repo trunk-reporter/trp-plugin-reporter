@@ -25,6 +25,8 @@ use crate::store::{Store, now_ms};
 
 /// How often the recorder gets metrics.
 const TICK: Duration = Duration::from_secs(5);
+/// How often the metrics' call count is counted again (it walks the calls table).
+const CALLS_EVERY: Duration = Duration::from_secs(60);
 /// The first decimate and retain run this long after start.
 const FIRST_UPKEEP: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3_600);
@@ -61,18 +63,18 @@ fn store_bytes(db: &Path) -> u64 {
     [db, wal.as_path()].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
 }
 
-/// What the recorder shows on the plugin's card.
-fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64) -> Metrics {
+/// What the recorder shows on the plugin's card; `calls` is the stored call count.
+fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64, calls: i64) -> Metrics {
     let mb = (store_bytes(db) as f64 / 1e5).round() / 10.0;
     let mut m = Metrics { queued: Some(store.queue_len() as u64), ..Default::default() };
-    m.extra.insert("calls".into(), json!(calls_stored(store)));
+    m.extra.insert("calls".into(), json!(calls));
     m.extra.insert("store_mb".into(), json!(mb));
     m.extra.insert("serving".into(), json!(serving.unwrap_or("not serving")));
     m.extra.insert("dropped_events".into(), json!(dropped));
     m
 }
 
-/// Metrics every [`TICK`]; recorder samples thinned hourly and old history
+/// Metrics every [`TICK`] (the call count every [`CALLS_EVERY`]); recorder samples thinned hourly and old history
 /// deleted daily (both first a minute after start). Stops when the sender
 /// is used or dropped.
 fn maintenance(
@@ -89,9 +91,18 @@ fn maintenance(
         .spawn(move || {
             let first = Instant::now() + FIRST_UPKEEP;
             let (mut next_decimate, mut next_retain) = (first, first);
+            let mut calls: Option<(Instant, i64)> = None;
             // A message or a dropped sender ends it.
             while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(TICK) {
-                host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed)));
+                let count = match calls {
+                    Some((at, n)) if at.elapsed() < CALLS_EVERY => n,
+                    _ => {
+                        let n = calls_stored(&store);
+                        calls = Some((Instant::now(), n));
+                        n
+                    }
+                };
+                host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed), count));
                 let now = Instant::now();
                 if now >= next_decimate {
                     store.write(|c| decimate(c, now_ms()).map(|_| ()));
@@ -352,12 +363,13 @@ mod tests {
         let dir = testing::temp_dir("reporter-metrics");
         let db = dir.join("engine.sqlite");
         let store = Store::open(&db).unwrap();
-        let m = metrics(&store, &db, Some("http://127.0.0.1:8092/"), 3);
+        let m = metrics(&store, &db, Some("http://127.0.0.1:8092/"), 3, calls_stored(&store));
         assert_eq!(m.queued, Some(0));
         assert_eq!(m.extra["calls"], 0);
         assert_eq!(m.extra["serving"], "http://127.0.0.1:8092/");
         assert_eq!(m.extra["dropped_events"], 3);
         assert!(m.extra["store_mb"].as_f64().is_some_and(|mb| mb >= 0.0));
-        assert_eq!(metrics(&store, &db, None, 0).extra["serving"], "not serving");
+        assert_eq!(metrics(&store, &db, None, 0, 7).extra["serving"], "not serving");
+        assert_eq!(metrics(&store, &db, None, 0, 7).extra["calls"], 7);
     }
 }

@@ -141,6 +141,7 @@ CREATE TABLE unit_events (
 );
 CREATE INDEX unit_events_unit_time ON unit_events(system_id, unit, time_ms);
 CREATE INDEX unit_events_time ON unit_events(time_ms);
+CREATE INDEX IF NOT EXISTS unit_events_tg_time ON unit_events(system_id, tgid, time_ms);
 CREATE UNIQUE INDEX unit_events_call ON unit_events(call_id, unit, event_type) WHERE call_id IS NOT NULL;
 
 CREATE TABLE recorder_state (

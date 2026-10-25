@@ -75,7 +75,7 @@ pub fn touch_unit(
 }
 
 pub fn unit(conn: &Connection, system_id: SystemId, unit_id: u32) -> rusqlite::Result<Option<UnitRow>> {
-    conn.query_row(&format!("SELECT {UNIT_COLS} FROM units WHERE system_id = ?1 AND unit_id = ?2"), (system_id, unit_id), unit_row).optional()
+    conn.prepare_cached(&format!("SELECT {UNIT_COLS} FROM units WHERE system_id = ?1 AND unit_id = ?2"))?.query_row((system_id, unit_id), unit_row).optional()
 }
 
 /// The unit under every system that has it.

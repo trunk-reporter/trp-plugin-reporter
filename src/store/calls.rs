@@ -345,17 +345,18 @@ pub(super) fn push_in(conds: &mut Vec<String>, params: &mut Vec<Value>, prefix: 
     conds.push(format!("{prefix}IN ({}){suffix}", marks.join(", ")));
 }
 
-/// The page of calls the filter matches, and how many match in all.
-pub fn list_calls(conn: &Connection, f: &CallFilter) -> rusqlite::Result<(Vec<CallRow>, i64)> {
+/// The filter's WHERE clause (empty, or starting with a space) and its parameters.
+fn call_where(f: &CallFilter) -> (String, Vec<Value>) {
     let mut conds: Vec<String> = Vec::new();
     let mut params: Vec<Value> = Vec::new();
     push_in(&mut conds, &mut params, "system_id ", "", &f.system_ids);
     push_in(&mut conds, &mut params, "site_id ", "", &f.site_ids);
     push_in(&mut conds, &mut params, "tgid ", "", &f.tgids.iter().map(|&t| t as i64).collect::<Vec<_>>());
+    // Seeks `call_transmissions_unit`, rather than probing every call.
     push_in(
         &mut conds,
         &mut params,
-        "EXISTS (SELECT 1 FROM call_transmissions t WHERE t.call_id = calls.id AND t.unit ",
+        "id IN (SELECT call_id FROM call_transmissions WHERE unit ",
         ")",
         &f.unit_ids.iter().map(|&u| u as i64).collect::<Vec<_>>(),
     );
@@ -374,6 +375,12 @@ pub fn list_calls(conn: &Connection, f: &CallFilter) -> rusqlite::Result<(Vec<Ca
         conds.push(format!("start_ms <= ?{}", params.len()));
     }
     let wher = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+    (wher, params)
+}
+
+/// The page of calls the filter matches, and how many match in all.
+pub fn list_calls(conn: &Connection, f: &CallFilter) -> rusqlite::Result<(Vec<CallRow>, i64)> {
+    let (wher, mut params) = call_where(f);
     let total: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM calls{wher}"), params_from_iter(params.iter()), |r| r.get(0))?;
     let n = params.len();
     params.push(Value::Integer(f.limit as i64));
@@ -421,7 +428,7 @@ pub struct FrequencyRow {
 }
 
 pub fn transmissions(conn: &Connection, id: CallId) -> rusqlite::Result<Vec<TransmissionRow>> {
-    conn.prepare("SELECT position, unit, time_ms, pos_s, len_s, emergency, tag FROM call_transmissions WHERE call_id = ?1 ORDER BY position")?
+    conn.prepare_cached("SELECT position, unit, time_ms, pos_s, len_s, emergency, tag FROM call_transmissions WHERE call_id = ?1 ORDER BY position")?
         .query_map([id], |r| {
             Ok(TransmissionRow {
                 position: r.get(0)?,
@@ -437,7 +444,7 @@ pub fn transmissions(conn: &Connection, id: CallId) -> rusqlite::Result<Vec<Tran
 }
 
 pub fn frequencies(conn: &Connection, id: CallId) -> rusqlite::Result<Vec<FrequencyRow>> {
-    conn.prepare("SELECT position, freq_hz, time_ms, pos_s, len_s, error_count, spike_count FROM call_frequencies WHERE call_id = ?1 ORDER BY position")?
+    conn.prepare_cached("SELECT position, freq_hz, time_ms, pos_s, len_s, error_count, spike_count FROM call_frequencies WHERE call_id = ?1 ORDER BY position")?
         .query_map([id], |r| {
             Ok(FrequencyRow {
                 position: r.get(0)?,
@@ -454,7 +461,7 @@ pub fn frequencies(conn: &Connection, id: CallId) -> rusqlite::Result<Vec<Freque
 
 /// The radios heard on the call, each once, in the order first heard.
 pub fn units_of(conn: &Connection, id: CallId) -> rusqlite::Result<Vec<u32>> {
-    conn.prepare("SELECT unit FROM call_transmissions WHERE call_id = ?1 GROUP BY unit ORDER BY MIN(position)")?.query_map([id], |r| r.get(0))?.collect()
+    conn.prepare_cached("SELECT unit FROM call_transmissions WHERE call_id = ?1 GROUP BY unit ORDER BY MIN(position)")?.query_map([id], |r| r.get(0))?.collect()
 }
 
 /// When the system's newest call started.
@@ -621,5 +628,14 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.tgid).collect::<Vec<_>>(), vec![101, 101, 101, 202, 202]);
         let (rows, _) = list(CallFilter { sort: CallSort::Tgid, desc: true, ..Default::default() });
         assert_eq!(rows[0].tgid, 202);
+    }
+
+    #[test]
+    fn the_unit_filter_seeks_the_unit_index_of_transmissions() {
+        let s = Store::in_memory();
+        let (wher, params) = call_where(&CallFilter { system_ids: vec![1], unit_ids: vec![1234, 99], ..Default::default() });
+        let sql = format!("SELECT COUNT(*) FROM calls{wher}");
+        let plan = s.read(|c| Ok(crate::store::talkgroups::tests::plan(c, &sql, params_from_iter(params.iter())))).unwrap();
+        assert!(plan.contains("call_transmissions_unit"), "{plan}");
     }
 }

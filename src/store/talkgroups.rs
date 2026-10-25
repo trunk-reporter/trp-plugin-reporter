@@ -126,20 +126,45 @@ fn talkgroup_row(r: &Row<'_>) -> rusqlite::Result<TalkgroupRow> {
     })
 }
 
+/// One live statistic of a row of `talkgroups`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stat {
+    Calls30d,
+    Calls1h,
+    Calls24h,
+    Units30d,
+}
+
+/// The SQL for one statistic of the `talkgroups` row in scope; `cutoff` is the
+/// number of the parameter holding its window's cut-off.
+fn stat_sql(stat: Stat, cutoff: usize) -> String {
+    let calls = |since: usize| {
+        format!("(SELECT COUNT(*) FROM calls c WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{since})")
+    };
+    match stat {
+        Stat::Calls30d | Stat::Calls1h | Stat::Calls24h => calls(cutoff),
+        // The events branch seeks `unit_events_tg_time`.
+        Stat::Units30d => format!(
+            "(SELECT COUNT(*) FROM (\
+                SELECT t.unit FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
+                  WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{cutoff} \
+                UNION \
+                SELECT e.unit FROM unit_events e \
+                  WHERE e.system_id = talkgroups.system_id AND e.tgid = talkgroups.tgid AND e.time_ms > ?{cutoff}))"
+        ),
+    }
+}
+
 /// The live-statistics SELECT columns (`call_count_30d, calls_1h, calls_24h, unit_count_30d`)
 /// for rows of `talkgroups`. The arguments are the numbers of the parameters holding the
 /// window cut-offs (see [`window_cutoffs`]).
 fn stat_columns(h1: usize, h24: usize, d30: usize) -> String {
     format!(
-        "(SELECT COUNT(*) FROM calls c WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{d30}) AS call_count_30d, \
-         (SELECT COUNT(*) FROM calls c WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{h1}) AS calls_1h, \
-         (SELECT COUNT(*) FROM calls c WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{h24}) AS calls_24h, \
-         (SELECT COUNT(*) FROM (\
-            SELECT t.unit FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
-              WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{d30} \
-            UNION \
-            SELECT e.unit FROM unit_events e \
-              WHERE e.system_id = talkgroups.system_id AND e.tgid = talkgroups.tgid AND e.time_ms > ?{d30})) AS unit_count_30d"
+        "{} AS call_count_30d, {} AS calls_1h, {} AS calls_24h, {} AS unit_count_30d",
+        stat_sql(Stat::Calls30d, d30),
+        stat_sql(Stat::Calls1h, h1),
+        stat_sql(Stat::Calls24h, h24),
+        stat_sql(Stat::Units30d, d30)
     )
 }
 
@@ -153,7 +178,7 @@ pub fn talkgroup(conn: &Connection, system_id: SystemId, tgid: u32, now_ms: i64)
     // ?1..?3 are the cut-offs, ?4 and ?5 the key.
     let sql = format!("SELECT {TG_COLS}, {}, NULL FROM talkgroups WHERE system_id = ?4 AND tgid = ?5", stat_columns(1, 2, 3));
     let [h1, h24, d30] = window_cutoffs(now_ms);
-    conn.query_row(&sql, params_from_iter([h1, h24, d30, Value::Integer(system_id.0), Value::Integer(tgid as i64)]), talkgroup_row).optional()
+    conn.prepare_cached(&sql)?.query_row(params_from_iter([h1, h24, d30, Value::Integer(system_id.0), Value::Integer(tgid as i64)]), talkgroup_row).optional()
 }
 
 /// The talkgroup number under every system that has it, with statistics as of `now_ms`.
@@ -182,16 +207,17 @@ pub enum TgSort {
 }
 
 impl TgSort {
-    fn column(self) -> &'static str {
+    /// A column of `talkgroups`, or the statistic to compute for the sort.
+    fn key(self) -> Result<&'static str, Stat> {
         match self {
-            TgSort::AlphaTag => "alpha_tag",
-            TgSort::Tgid => "tgid",
-            TgSort::Group => "\"group\"",
-            TgSort::LastSeen => "last_heard_ms",
-            TgSort::CallCount => "call_count_30d",
-            TgSort::Calls1h => "calls_1h",
-            TgSort::Calls24h => "calls_24h",
-            TgSort::UnitCount => "unit_count_30d",
+            TgSort::AlphaTag => Ok("alpha_tag"),
+            TgSort::Tgid => Ok("tgid"),
+            TgSort::Group => Ok("\"group\""),
+            TgSort::LastSeen => Ok("last_heard_ms"),
+            TgSort::CallCount => Err(Stat::Calls30d),
+            TgSort::Calls1h => Err(Stat::Calls1h),
+            TgSort::Calls24h => Err(Stat::Calls24h),
+            TgSort::UnitCount => Err(Stat::Units30d),
         }
     }
 }
@@ -247,17 +273,32 @@ pub fn list_talkgroups(conn: &Connection, f: &TalkgroupFilter, now_ms: i64) -> r
         params.push(v);
         params.len()
     };
-    let (h1, h24, d30) = (bind(c1), bind(c24), bind(c30));
+    // Only the statistic sorted by is computed for every matching row; the
+    // others are computed for the page's rows alone, below.
+    let col = match f.sort.key() {
+        Ok(col) => col.to_string(),
+        Err(stat) => {
+            let cutoff = match stat {
+                Stat::Calls1h => c1,
+                Stat::Calls24h => c24,
+                Stat::Calls30d | Stat::Units30d => c30,
+            };
+            stat_sql(stat, bind(cutoff))
+        }
+    };
     let (limit, offset) = (bind(Value::Integer(f.limit as i64)), bind(Value::Integer(f.offset as i64)));
     let order_rel = if f.search.as_deref().is_some_and(|q| !q.is_empty()) { "relevance_score DESC, " } else { "" };
     let sql = format!(
-        "SELECT {TG_COLS}, {stats}, {relevance} AS relevance_score \
+        "SELECT {TG_COLS}, 0, 0, 0, 0, {relevance} AS relevance_score \
          FROM talkgroups{wher} ORDER BY {order_rel}{col} {dir}, tgid {dir}, system_id LIMIT ?{limit} OFFSET ?{offset}",
-        stats = stat_columns(h1, h24, d30),
-        col = f.sort.column(),
         dir = if f.desc { "DESC" } else { "ASC" },
     );
-    let rows = conn.prepare(&sql)?.query_map(params_from_iter(params.iter()), talkgroup_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut rows = conn.prepare(&sql)?.query_map(params_from_iter(params.iter()), talkgroup_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &mut rows {
+        if let Some(full) = talkgroup(conn, row.system_id, row.tgid, now_ms)? {
+            (row.call_count_30d, row.calls_1h, row.calls_24h, row.unit_count_30d) = (full.call_count_30d, full.calls_1h, full.calls_24h, full.unit_count_30d);
+        }
+    }
     Ok((rows, total))
 }
 
@@ -331,7 +372,7 @@ pub fn encryption_stats(conn: &Connection, since_ms: i64, system_ids: &[i64]) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::store::Store;
     use crate::store::systems::ensure_system;
@@ -529,5 +570,51 @@ mod tests {
         let tg202 = stats.iter().find(|r| r.tgid == 202).unwrap();
         assert_eq!((tg202.encrypted_calls, tg202.clear_calls, tg202.alpha_tag.as_str()), (1, 0, ""));
         assert_eq!(s.read(|c| encryption_stats(c, 1_000, &[])).unwrap().len(), 3);
+    }
+
+    /// The plan of a query, all its lines joined.
+    pub(crate) fn plan(c: &rusqlite::Connection, sql: &str, params: impl rusqlite::Params) -> String {
+        c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_unit_count_seeks_the_talkgroup_index_of_unit_events() {
+        let s = Store::in_memory();
+        let sql = format!("SELECT {} FROM talkgroups WHERE system_id = ?2 AND tgid = ?3", stat_sql(Stat::Units30d, 1));
+        let plan = s.read(|c| Ok(plan(c, &sql, (0, 1, 101)))).unwrap();
+        assert!(plan.contains("unit_events_tg_time"), "{plan}");
+    }
+
+    #[test]
+    fn a_page_sorted_by_a_statistic_has_every_statistic() {
+        let s = Store::in_memory();
+        let sys = sys(&s);
+        let now = 100 * 86_400_000_i64;
+        s.write_sync(move |c| {
+            for tg in [101, 202, 303] {
+                touch_talkgroup(c, sys, tg, &tags("", "", "", ""), now, false, None)?;
+            }
+            for (tg, n) in [(101, 1), (202, 3), (303, 2)] {
+                for _ in 0..n {
+                    let call = add_call(c, sys, tg, now - 60_000, false);
+                    add_tx(c, call, 0, tg);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let f = TalkgroupFilter { sort: TgSort::Calls1h, desc: true, limit: 2, ..Default::default() };
+        let (rows, total) = s.read(|c| list_talkgroups(c, &f, now)).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            rows.iter().map(|r| (r.tgid, r.calls_1h, r.calls_24h, r.call_count_30d, r.unit_count_30d)).collect::<Vec<_>>(),
+            vec![(202, 3, 3, 3, 1), (303, 2, 2, 2, 1)]
+        );
     }
 }

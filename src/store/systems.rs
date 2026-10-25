@@ -121,7 +121,7 @@ pub fn system_by_short_name(conn: &Connection, short_name: &str) -> rusqlite::Re
 }
 
 pub fn system_by_id(conn: &Connection, id: SystemId) -> rusqlite::Result<Option<SystemRow>> {
-    conn.query_row(&format!("SELECT {SYSTEM_COLS} FROM systems WHERE id = ?1"), [id], system_row).optional()
+    conn.prepare_cached(&format!("SELECT {SYSTEM_COLS} FROM systems WHERE id = ?1"))?.query_row([id], system_row).optional()
 }
 
 pub fn list_systems(conn: &Connection) -> rusqlite::Result<Vec<SystemRow>> {
@@ -133,7 +133,7 @@ pub fn list_sites(conn: &Connection, system: SystemId) -> rusqlite::Result<Vec<S
 }
 
 pub fn site_by_id(conn: &Connection, id: SiteId) -> rusqlite::Result<Option<SiteRow>> {
-    conn.query_row(&format!("SELECT {SITE_COLS} FROM sites WHERE id = ?1"), [id], site_row).optional()
+    conn.prepare_cached(&format!("SELECT {SITE_COLS} FROM sites WHERE id = ?1"))?.query_row([id], site_row).optional()
 }
 
 /// A system's (talkgroup count, unit count, calls started in the 24 h before `now_ms`).

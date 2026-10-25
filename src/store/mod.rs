@@ -16,13 +16,15 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
 const SCHEMA: &str = include_str!("schema.sql");
+/// Run on every open (see the file).
+const ENSURE: &str = include_str!("ensure.sql");
 const SCHEMA_VERSION: i64 = 1;
 const READERS: usize = 4;
 
@@ -129,12 +131,12 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let has: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')", [], |r| r.get(0))?;
-    if has {
-        return Ok(());
-    }
     let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(SCHEMA)?;
-    tx.execute("INSERT INTO schema_version VALUES (?1)", [SCHEMA_VERSION])?;
+    if !has {
+        tx.execute_batch(SCHEMA)?;
+        tx.execute("INSERT INTO schema_version VALUES (?1)", [SCHEMA_VERSION])?;
+    }
+    tx.execute_batch(ENSURE)?;
     tx.commit()
 }
 
@@ -263,10 +265,17 @@ impl Store {
         rrx.recv().map_err(|_| StoreError("write failed before it returned".into()))?
     }
 
-    /// Run a read on one of the pooled connections.
+    /// Run a read on one of the pooled connections: the first free one,
+    /// starting from the next in turn, or (all busy) wait for that one.
     pub fn read<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, StoreError> {
-        let i = self.inner.next_reader.fetch_add(1, Ordering::Relaxed) % self.inner.readers.len();
-        let conn = lock(&self.inner.readers[i]);
+        let readers = &self.inner.readers;
+        let start = self.inner.next_reader.fetch_add(1, Ordering::Relaxed) % readers.len();
+        let free = (0..readers.len()).find_map(|k| match readers[(start + k) % readers.len()].try_lock() {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        });
+        let conn = free.unwrap_or_else(|| lock(&readers[start]));
         f(&conn).map_err(StoreError::from)
     }
 
@@ -356,7 +365,7 @@ mod tests {
         }
         s.flush();
         assert_eq!(s.queue_len(), 0);
-        assert_eq!(s.read(|c| c.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0))).unwrap(), 100);
+        assert_eq!(s.read(|c| c.query_row("SELECT count(*) FROM meta WHERE key LIKE 'k%'", [], |r| r.get::<_, i64>(0))).unwrap(), 100);
         assert_eq!(s.read(|c| meta_get(c, "k7")).unwrap(), Some("7".into()));
     }
 
@@ -438,6 +447,16 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), (Some(42), Some("v".into())));
         assert_eq!(rx.recv().unwrap(), (None, None));
         assert_eq!(s.read(|c| meta_get(c, "half")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_busy_reader_does_not_hold_up_a_read() {
+        let s = Store::in_memory();
+        let held: Vec<_> = s.inner.readers[..READERS - 1].iter().map(|m| m.lock().unwrap()).collect();
+        for _ in 0..2 * READERS {
+            assert_eq!(s.read(|c| c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))).unwrap(), 1);
+        }
+        drop(held);
     }
 
     #[test]
