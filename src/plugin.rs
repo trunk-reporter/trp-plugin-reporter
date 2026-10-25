@@ -18,6 +18,7 @@ use crate::bus::Bus;
 use crate::config::{Config, SystemConfig};
 use crate::ingest::Ingest;
 use crate::server::{self, BUS_RING, ServerHandle, WEEK_MS};
+use crate::store::calls::end_stale_calls;
 use crate::store::recorder::{decimate, retain};
 use crate::store::systems::{list_systems, meta_set};
 use crate::store::units::affiliation_events_since;
@@ -153,6 +154,8 @@ impl Plugin for Reporter {
             ("host_version", setup.host.version.clone()),
         ];
         store.write_sync(move |c| meta.iter().try_for_each(|(k, v)| meta_set(c, k, v))).map_err(|e| e.to_string())?;
+        // No call is live before the recorder's first message.
+        store.write_sync(end_stale_calls).map_err(|e| e.to_string())?;
         let bus = Bus::new(BUS_RING);
         let affiliations = Affiliations::new();
         let new_ingest = || -> Result<Ingest, String> {
@@ -343,6 +346,26 @@ mod tests {
         assert!(captured.output().logs().iter().any(|(_, m)| m.contains("backfill: 2 calls added from 2 files")));
         let mark = crate::store::systems::meta_get;
         assert_eq!(plugin.store.read(|c| mark(c, crate::backfill::COMPLETE_KEY)).unwrap().as_deref(), Some("1"));
+        plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_call_left_recording_by_the_last_run_is_ended_at_start() {
+        let dir = testing::temp_dir("reporter-stale");
+        let db = dir.join("data").join("engine.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let store = Store::open(&db).unwrap();
+        store
+            .write_sync(|c| {
+                c.execute("INSERT INTO systems (short_name, kind, first_seen_ms, last_seen_ms) VALUES ('sys1', 'p25', 0, 0)", [])?;
+                c.execute("INSERT INTO calls (system_id, call_num, tgid, start_ms, state) VALUES (1, 7, 101, ?1, 'recording')", [now_ms()])
+            })
+            .unwrap();
+        drop(store);
+        let (host, _captured) = testing::capture();
+        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, backfill: false, ..Config::default() })).unwrap();
+        let state: String = plugin.store.read(|c| c.query_row("SELECT state FROM calls", [], |r| r.get(0))).unwrap();
+        assert_eq!(state, "ended");
         plugin.shutdown(Duration::from_secs(1));
     }
 

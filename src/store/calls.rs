@@ -110,7 +110,54 @@ pub fn transmission_len_s(src_list: &[SrcEntry], i: usize, call_length_s: f64) -
     }
 }
 
-/// The call's files are on disk. Updates `existing`, else inserts (or, for a path seen before, updates that row).
+/// Calls still `recording` when the recorder (re)starts: their end will never
+/// come (call numbers restart with the recorder), so they are `ended` now.
+pub fn end_stale_calls(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute("UPDATE calls SET state = 'ended', end_ms = COALESCE(end_ms, start_ms), length_ms = COALESCE(length_ms, 0) WHERE state = 'recording'", [])
+}
+
+/// A stored call with no files yet (its `call.start` was stored, its files
+/// were not) that a record describes: same system, talkgroup and call
+/// number, started within 2 s.
+fn start_only_call(conn: &Connection, system_id: SystemId, tgid: u32, call_num: i64, start_ms: i64) -> rusqlite::Result<Option<CallId>> {
+    conn.prepare_cached(
+        "SELECT id FROM calls WHERE path IS NULL AND system_id = ?1 AND tgid = ?2 AND call_num = ?3 \
+         AND start_ms > ?4 - 2000 AND start_ms < ?4 + 2000 ORDER BY ABS(start_ms - ?4), id LIMIT 1",
+    )?
+    .query_row((system_id, tgid, call_num, start_ms), |r| r.get(0))
+    .optional()
+}
+
+/// Delete the call other than `keep` that holds `path` (a backfill stored the
+/// file first), with its unit events, and uncount it from its talkgroup.
+fn drop_other_holder(conn: &Connection, keep: CallId, path: &str) -> rusqlite::Result<()> {
+    let other: Option<(CallId, SystemId, u32, bool)> = conn
+        .query_row("SELECT id, system_id, tgid, encrypted FROM calls WHERE path = ?1 AND id <> ?2", (path, keep), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .optional()?;
+    let Some((id, system_id, tgid, encrypted)) = other else { return Ok(()) };
+    conn.execute("DELETE FROM unit_events WHERE call_id = ?1", [id])?;
+    // Its transmissions and frequencies go with it (ON DELETE CASCADE).
+    conn.execute("DELETE FROM calls WHERE id = ?1", [id])?;
+    conn.execute(
+        "UPDATE talkgroups SET call_count = MAX(call_count - 1, 0), encrypted_count = MAX(encrypted_count - ?3, 0) WHERE system_id = ?1 AND tgid = ?2",
+        (system_id, tgid, encrypted),
+    )?;
+    Ok(())
+}
+
+/// What [`call_concluded`] stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Concluded {
+    pub id: CallId,
+    /// The call was stored before (its start, or the same path), so its talkgroup has counted it.
+    pub known: bool,
+}
+
+/// The call's files are on disk. Updates `existing`, else a start-only row of
+/// the same call, else inserts (or, for a path seen before, updates that row).
+/// A different row holding the path is deleted.
 #[allow(clippy::too_many_arguments)]
 pub fn call_concluded(
     conn: &Connection,
@@ -121,7 +168,7 @@ pub fn call_concluded(
     audio_path: Option<&str>,
     json_path: &str,
     existing: Option<CallId>,
-) -> rusqlite::Result<CallId> {
+) -> rusqlite::Result<Concluded> {
     let start_ms = if record.start_time_ms != 0 { record.start_time_ms } else { record.start_time * 1000 };
     let end_ms = if record.stop_time_ms != 0 { record.stop_time_ms } else { record.stop_time * 1000 };
     let length_ms = if record.call_length_ms != 0 { record.call_length_ms } else { (record.call_length * 1000.0) as i64 };
@@ -129,6 +176,14 @@ pub fn call_concluded(
     let metadata = (!record.extra.is_empty()).then(|| serde_json::to_string(&record.extra).unwrap_or_default());
     let slot = (record.tdma_slot >= 0).then_some(record.tdma_slot);
     let opt = |v: i64| (v >= 0).then_some(v);
+    let existing = match existing {
+        Some(id) => Some(id),
+        None => start_only_call(conn, system_id, record.talkgroup, record.call_num as i64, start_ms)?,
+    };
+    let known = existing.is_some() || path_exists(conn, path)?;
+    if let Some(keep) = existing {
+        drop_other_holder(conn, keep, path)?;
+    }
     let conflict = if existing.is_some() { "id" } else { "path" };
     let sql = format!(
         "INSERT INTO calls (id, path, system_id, site_id, call_num, tgid, start_ms, end_ms, length_ms, freq_hz, tdma_slot, phase2_tdma, analog, encrypted, algid, key_id, decrypted, \
@@ -175,7 +230,7 @@ pub fn call_concluded(
     for (i, f) in record.freq_list.iter().enumerate() {
         fq.execute((id, i as i64, f.freq as i64, f.time * 1000, f.pos, f.len, f.error_count as i64, f.spike_count as i64))?;
     }
-    Ok(id)
+    Ok(Concluded { id, known })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -400,9 +455,11 @@ pub fn call_by_id(conn: &Connection, id: CallId) -> rusqlite::Result<Option<Call
     conn.query_row(&format!("SELECT {CALL_COLS} FROM calls WHERE id = ?1"), [id], call_row).optional()
 }
 
-/// Calls still being recorded, oldest first.
-pub fn active_calls(conn: &Connection) -> rusqlite::Result<Vec<CallRow>> {
-    conn.prepare(&format!("SELECT {CALL_COLS} FROM calls WHERE state = 'recording' ORDER BY start_ms, id"))?.query_map([], call_row)?.collect()
+/// Calls still being recorded that started in the hour before `now_ms`, oldest first.
+pub fn active_calls(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<CallRow>> {
+    conn.prepare(&format!("SELECT {CALL_COLS} FROM calls WHERE state = 'recording' AND start_ms > ?1 ORDER BY start_ms, id"))?
+        .query_map([now_ms - 3_600_000], call_row)?
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -509,14 +566,15 @@ mod tests {
         let i = info(101, rec.start_time as f64);
         let id = s.write_sync(move |c| call_started(c, &NewCall::from_info(&i, sys, Some(site)))).unwrap();
         assert_eq!(s.read(|c| call_by_id(c, id)).unwrap().unwrap().state, "recording");
-        assert_eq!(s.read(active_calls).unwrap().len(), 1);
+        assert_eq!(s.read(|c| active_calls(c, rec.start_time * 1000)).unwrap().len(), 1);
+        assert_eq!(s.read(|c| active_calls(c, rec.start_time * 1000 + 3_600_000)).unwrap().len(), 0, "an hour on, it is not live");
         let i = info(101, rec.start_time as f64);
         let end = rec.start_time * 1000 + 3000;
         s.write_sync(move |c| call_ended(c, id, end, &i)).unwrap();
         let row = s.read(|c| call_by_id(c, id)).unwrap().unwrap();
         assert_eq!((row.state.as_str(), row.length_ms, row.end_ms), ("ended", Some(3000), Some(end)));
         let r2 = rec.clone();
-        let id2 = s.write_sync(move |c| call_concluded(c, sys, Some(site), "sys1/a", &r2, Some("sys1/a.m4a"), "sys1/a.json", Some(id))).unwrap();
+        let id2 = s.write_sync(move |c| call_concluded(c, sys, Some(site), "sys1/a", &r2, Some("sys1/a.m4a"), "sys1/a.json", Some(id))).unwrap().id;
         assert_eq!(id2, id);
         let row = s.read(|c| call_by_id(c, id)).unwrap().unwrap();
         assert_eq!((row.state.as_str(), row.recorded, row.audio_path.as_deref(), row.length_ms), ("concluded", true, Some("sys1/a.m4a"), Some(3000)));
@@ -524,7 +582,7 @@ mod tests {
         assert_eq!(s.read(|c| transmissions(c, id)).unwrap().len(), 1);
         assert_eq!(s.read(|c| frequencies(c, id)).unwrap().len(), 1);
         assert_eq!(s.read(|c| list_calls(c, &CallFilter::default())).unwrap().1, 1);
-        assert_eq!(s.read(active_calls).unwrap().len(), 0);
+        assert_eq!(s.read(|c| active_calls(c, rec.start_time * 1000)).unwrap().len(), 0);
     }
 
     #[test]
@@ -539,7 +597,7 @@ mod tests {
         rec.patched_talkgroups = vec![101, 65001];
         let expect = rec.start_time * 1000;
         let r = rec.clone();
-        let id = s.write_sync(move |c| call_concluded(c, sys, None, "sys1/b", &r, None, "sys1/b.json", None)).unwrap();
+        let id = s.write_sync(move |c| call_concluded(c, sys, None, "sys1/b", &r, None, "sys1/b.json", None)).unwrap().id;
         let row = s.read(|c| call_by_id(c, id)).unwrap().unwrap();
         assert_eq!(row.start_ms, expect);
         assert_eq!(row.end_ms, Some(rec.stop_time * 1000));
@@ -562,10 +620,65 @@ mod tests {
             let r = rec.clone();
             ids.push(s.write_sync(move |c| call_concluded(c, sys, None, "sys1/c", &r, Some("sys1/c.m4a"), "sys1/c.json", None)).unwrap());
         }
-        assert_eq!(ids[0], ids[1]);
+        assert_eq!((ids[0].id, ids[0].known, ids[1].known), (ids[1].id, false, true));
+        let ids: Vec<CallId> = ids.iter().map(|c| c.id).collect();
         assert_eq!(s.read(|c| list_calls(c, &CallFilter::default())).unwrap().1, 1);
         assert_eq!(s.read(|c| transmissions(c, ids[0])).unwrap().len(), 1);
         assert_eq!(s.read(|c| frequencies(c, ids[0])).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_recording_row_is_ended_at_start_up() {
+        let s = Store::in_memory();
+        let (sys, site) = setup(&s);
+        let i = info(101, 1_700_000_000.0);
+        let id = s.write_sync(move |c| call_started(c, &NewCall::from_info(&i, sys, Some(site)))).unwrap();
+        assert_eq!(s.write_sync(end_stale_calls).unwrap(), 1);
+        let row = s.read(|c| call_by_id(c, id)).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.end_ms, row.length_ms), ("ended", Some(1_700_000_000_000), Some(0)));
+        assert_eq!(s.write_sync(end_stale_calls).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_concluded_record_takes_over_its_start_only_row() {
+        let s = Store::in_memory();
+        let (sys, site) = setup(&s);
+        let mut rec = record(101);
+        rec.call_num = 7;
+        let mut i = info(101, rec.start_time as f64 + 0.5);
+        i.id = 7;
+        let started = s.write_sync(move |c| call_started(c, &NewCall::from_info(&i, sys, Some(site)))).unwrap();
+        // Another call number, or a start far off, is another call.
+        let mut other = info(101, rec.start_time as f64 + 30.0);
+        other.id = 7;
+        let far = s.write_sync(move |c| call_started(c, &NewCall::from_info(&other, sys, Some(site)))).unwrap();
+        let r = rec.clone();
+        let done = s.write_sync(move |c| call_concluded(c, sys, Some(site), "sys1/a", &r, None, "sys1/a.json", None)).unwrap();
+        assert_eq!(done, Concluded { id: started, known: true });
+        assert_eq!(s.read(|c| call_by_id(c, started)).unwrap().unwrap().path.as_deref(), Some("sys1/a"));
+        assert_eq!(s.read(|c| call_by_id(c, far)).unwrap().unwrap().path, None);
+        assert_eq!(s.read(|c| list_calls(c, &CallFilter::default())).unwrap().1, 2);
+    }
+
+    #[test]
+    fn a_live_conclusion_replaces_a_row_that_took_its_path() {
+        let s = Store::in_memory();
+        let (sys, site) = setup(&s);
+        let rec = record(101);
+        let i = info(555, rec.start_time as f64);
+        let live = s.write_sync(move |c| call_started(c, &NewCall::from_info(&i, sys, Some(site)))).unwrap();
+        // A backfill stored the same files first, as a call of its own.
+        let r = rec.clone();
+        let first = s.write_sync(move |c| call_concluded(c, sys, Some(site), "sys1/a", &r, None, "sys1/a.json", None)).unwrap();
+        assert_ne!(first.id, live);
+        let r = rec.clone();
+        let done = s.write_sync(move |c| call_concluded(c, sys, Some(site), "sys1/a", &r, None, "sys1/a.json", Some(live))).unwrap();
+        assert_eq!(done, Concluded { id: live, known: true });
+        assert_eq!(s.read(|c| list_calls(c, &CallFilter::default())).unwrap().1, 1);
+        assert!(s.read(|c| call_by_id(c, first.id)).unwrap().is_none());
+        assert_eq!(s.read(|c| transmissions(c, live)).unwrap().len(), 1);
+        let orphans: i64 = s.read(|c| c.query_row("SELECT count(*) FROM call_transmissions WHERE call_id = ?1", [first.id], |r| r.get(0))).unwrap();
+        assert_eq!(orphans, 0);
     }
 
     #[test]

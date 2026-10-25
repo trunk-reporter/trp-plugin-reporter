@@ -150,7 +150,7 @@ impl After {
 }
 
 /// Insert synthesized `call`/`end` events. When `live`, those that are new feed
-/// the affiliation map and each `call` event of a unit in `tell` is published.
+/// the affiliation map and are published: each `end`, and each `call` of a unit in `tell`.
 /// (Backfilled history leaves the live map alone: the start-up rebuild covers it.)
 fn insert_transmission_events(conn: &Connection, after: &mut After, live: bool, events: &[NewUnitEvent], tell: &mut HashSet<u32>) -> rusqlite::Result<()> {
     for e in events {
@@ -159,7 +159,7 @@ fn insert_transmission_events(conn: &Connection, after: &mut After, live: bool, 
             continue;
         }
         after.affiliate(conn, e);
-        if e.event_type == "call" && tell.remove(&e.unit) {
+        if e.event_type == "end" || (e.event_type == "call" && tell.remove(&e.unit)) {
             let event = unit_event(conn, id, e, &after.instance)?;
             after.events.push(event);
         }
@@ -470,10 +470,11 @@ impl Ingest {
             let r = &k.record;
             let existing = k.existing.as_ref().and_then(|cell| cell.get().copied());
             let audio_path = k.audio.stored();
-            let id = call_concluded(c, k.system_id, k.site_id, &k.path, r, audio_path.as_deref(), &k.json_path, existing)?;
+            let done = call_concluded(c, k.system_id, k.site_id, &k.path, r, audio_path.as_deref(), &k.json_path, existing)?;
+            let id = done.id;
             let tags = TgTags::from_record(r);
-            if existing.is_some() {
-                // `call.start` counted it already.
+            if done.known {
+                // Its `call.start` (or an earlier copy of its files) counted it already.
                 tag_talkgroup(c, k.system_id, r.talkgroup, &tags)?;
             } else {
                 let algid = u8::try_from(r.algid).ok();
@@ -676,11 +677,20 @@ mod tests {
 
         assert_eq!(
             kinds(&events),
-            vec![("call_start", None), ("unit_event", Some("call".into())), ("call_update", None), ("unit_event", Some("call".into())), ("call_end", None),]
+            vec![
+                ("call_start", None),
+                ("unit_event", Some("call".into())),
+                ("call_update", None),
+                ("unit_event", Some("call".into())),
+                ("unit_event", Some("end".into())),
+                ("unit_event", Some("end".into())),
+                ("call_end", None),
+            ]
         );
         assert_eq!(events[1].unit_id, Some(10));
         assert_eq!(events[3].unit_id, Some(20));
-        let data: Value = serde_json::from_str(&events[4].data).unwrap();
+        assert_eq!((events[4].unit_id, events[5].unit_id), (Some(10), Some(20)));
+        let data: Value = serde_json::from_str(&events[6].data).unwrap();
         assert_eq!((data["call_id"].as_i64(), data["call_state"].as_str(), data["tgid"].as_u64()), (Some(1), Some("completed"), Some(101)));
         // The call events carry the API's `Call`.
         let start: Value = serde_json::from_str(&events[0].data).unwrap();
@@ -704,7 +714,7 @@ mod tests {
         let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
         assert_eq!((row.recorded, row.not_recorded_reason.as_deref(), row.state.as_str()), (false, Some("encrypted"), "ended"));
         assert_eq!(r.unit_events(), vec![("call".into(), 10), ("end".into(), 10)]);
-        assert_eq!(kinds(&events), vec![("call_start", None), ("unit_event", Some("call".into())), ("call_update", None)]);
+        assert_eq!(kinds(&events), vec![("call_start", None), ("unit_event", Some("call".into())), ("call_update", None), ("unit_event", Some("end".into()))]);
         assert!(r.captured.output().results().is_empty());
         assert!(r.ingest.live.is_empty());
     }
@@ -721,8 +731,50 @@ mod tests {
         assert_eq!((row.path.as_deref(), row.tgid, row.start_ms, row.state.as_str()), (Some(path.as_str()), 101, T0 * 1000, "concluded"));
         assert_eq!(r.unit_events(), vec![("call".into(), 1234), ("end".into(), 1234)]);
         assert_eq!(r.count("SELECT call_count FROM talkgroups WHERE tgid = 101"), 1);
-        assert_eq!(kinds(&events), vec![("unit_event", Some("call".into())), ("call_end", None)]);
+        assert_eq!(kinds(&events), vec![("unit_event", Some("call".into())), ("unit_event", Some("end".into())), ("call_end", None)]);
         assert_eq!(r.captured.output().results(), vec![(path, Outcome::Ok, String::new(), String::new())]);
+    }
+
+    #[test]
+    fn after_a_restart_a_concluded_call_takes_over_its_stored_start() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[(10, T0)], true)));
+        r.events();
+        // The plugin restarts: the new run knows nothing of call 7.
+        let (host, _) = testing::capture();
+        let mut again = Ingest::new(r.store.clone(), Bus::new(10), Affiliations::new(), Some(host), &systems()).unwrap().with_capture_dir(r.dir.clone());
+        let mut cc = testing::call(&r.dir, "sys1", 101);
+        cc.call.call_num = 7;
+        again.handle(HostMessage::CallConcluded(cc));
+        r.store.flush();
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 1);
+        assert_eq!(r.count("SELECT call_count FROM talkgroups WHERE tgid = 101"), 1);
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.path.is_some()), ("concluded", true));
+    }
+
+    #[test]
+    fn a_live_conclusion_after_a_backfill_of_its_files_keeps_one_row() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[(10, T0)], true)));
+        r.events();
+        // The backfill saw the files first (with a call number the live call does not match).
+        let mut cc = testing::call(&r.dir, "sys1", 101);
+        let mut on_disk = cc.call.clone();
+        on_disk.call_num = 99;
+        r.ingest.backfill_record(&cc.path, &on_disk, None, &format!("{}.json", cc.path));
+        r.store.flush();
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 2);
+        cc.call.call_num = 7;
+        let path = cc.path.clone();
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        let events = r.events();
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 1);
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.path.as_deref()), ("concluded", Some(path.as_str())));
+        assert_eq!(r.count("SELECT call_count FROM talkgroups WHERE tgid = 101"), 1);
+        assert_eq!(r.count("SELECT count(*) FROM unit_events WHERE call_id <> 1"), 0);
+        assert_eq!(kinds(&events).last(), Some(&("call_end", None)));
     }
 
     #[test]

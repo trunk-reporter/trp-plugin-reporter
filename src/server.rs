@@ -14,6 +14,7 @@ use crate::affiliations::Affiliations;
 use crate::api::{AppState, HostStatus, router};
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::store::calls::end_stale_calls;
 use crate::store::systems::meta_get;
 use crate::store::units::affiliation_events_since;
 use crate::store::{Store, now_ms};
@@ -112,6 +113,8 @@ pub fn serve_data_dir(data_dir: &Path) -> Result<ServerHandle, String> {
     };
     let store = Store::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     store.set_logger(Arc::new(|m| eprintln!("{m}")));
+    // The recorder is not attached: a call still `recording` lost its end.
+    store.write_sync(end_stale_calls).map_err(|e| e.to_string())?;
     let meta = |key: &str| store.read(|c| meta_get(c, key)).map_err(|e| e.to_string());
     let (Some(capture_dir), Some(host_name)) = (meta("capture_dir")?, meta("host_name")?) else {
         return Err(no_store());

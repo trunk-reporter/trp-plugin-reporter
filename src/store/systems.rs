@@ -80,12 +80,13 @@ fn site_row(r: &Row<'_>) -> rusqlite::Result<SiteRow> {
     })
 }
 
-/// Insert the system or touch it. `name` is replaced only by a non-empty one; `kind` is fixed at insert.
+/// Insert the system or touch it. `name` and `kind` are replaced only by non-empty ones.
 pub fn ensure_system(conn: &Connection, short_name: &str, kind: &str, name: &str, now_ms: i64) -> rusqlite::Result<SystemId> {
     conn.query_row(
         "INSERT INTO systems (short_name, kind, name, first_seen_ms, last_seen_ms) VALUES (?1, ?2, ?3, ?4, ?4) \
          ON CONFLICT(short_name) DO UPDATE SET last_seen_ms = excluded.last_seen_ms, \
-         name = CASE WHEN excluded.name = '' THEN name ELSE excluded.name END RETURNING id",
+         name = CASE WHEN excluded.name = '' THEN name ELSE excluded.name END, \
+         kind = CASE WHEN excluded.kind <> '' THEN excluded.kind ELSE kind END RETURNING id",
         (short_name, kind, name, now_ms),
         |r| r.get(0),
     )
@@ -158,6 +159,12 @@ mod tests {
         assert_eq!(a, b);
         let row = s.read(|c| system_by_short_name(c, "ohmarcs")).unwrap().unwrap();
         assert_eq!((row.name.as_str(), row.first_seen_ms, row.last_seen_ms, row.sysid), ("Ohio MARCS", 1_000, 2_000, None));
+        // A system first seen in an event has no kind; the hello's fills it, an empty one keeps it.
+        s.write_sync(|c| {
+            Ok((ensure_system(c, "later", "", "", 1_000)?, ensure_system(c, "later", "conventional", "", 2_000)?, ensure_system(c, "later", "", "", 3_000)?))
+        })
+        .unwrap();
+        assert_eq!(s.read(|c| system_by_short_name(c, "later")).unwrap().unwrap().kind, "conventional");
     }
 
     #[test]

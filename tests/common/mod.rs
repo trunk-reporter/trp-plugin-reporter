@@ -192,7 +192,7 @@ fn record(tg: &Tg, start_ms: i64, len_s: i64, emergency: bool, srcs: &[Src]) -> 
 /// Write a recorded call the way ingest's `call.concluded` (with no seen start) does.
 fn conclude(c: &rusqlite::Connection, sys: SystemId, site: SiteId, r: &CallRecord) -> rusqlite::Result<CallId> {
     let path = format!("ohmarcs/{}-{}_{}", r.talkgroup, r.start_time, r.freq);
-    let id = call_concluded(c, sys, Some(site), &path, r, Some(&format!("{path}.wav")), &format!("{path}.json"), None)?;
+    let id = call_concluded(c, sys, Some(site), &path, r, Some(&format!("{path}.wav")), &format!("{path}.json"), None)?.id;
     touch_talkgroup(c, sys, r.talkgroup, &TgTags::from_record(r), r.start_time_ms, r.encrypted, None)?;
     for s in &r.src_list {
         touch_unit(c, sys, s.src as u32, &s.tag, "", s.time * 1000, Some(("call", Some(r.talkgroup))))?;

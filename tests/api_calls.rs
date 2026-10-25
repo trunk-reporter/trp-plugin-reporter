@@ -165,6 +165,16 @@ async fn active_calls_are_the_ones_still_recording() {
         })
         .unwrap();
 
+    // A call that started over an hour ago and never ended is not live.
+    store
+        .write_sync(move |c| {
+            c.execute(
+                "INSERT INTO calls (system_id, site_id, call_num, tgid, start_ms, state) VALUES (?1, ?2, 98, 101, ?3, 'recording')",
+                (sys, site, now_ms() - 2 * 3_600_000),
+            )
+        })
+        .unwrap();
+
     let (st, v) = get(&app, "/api/v1/calls/active").await;
     assert_eq!(st, StatusCode::OK);
     assert_schema(&v, "ActiveCallListResponse");
@@ -187,7 +197,7 @@ async fn active_calls_are_the_ones_still_recording() {
     let (_, v) = get(&app, &format!("/api/v1/calls/{}", id.0)).await;
     assert_eq!(v["call_state"], "recording");
     let (_, v) = get(&app, "/api/v1/calls").await;
-    assert_eq!(v["total"], 7);
+    assert_eq!(v["total"], 8);
 }
 
 #[tokio::test]

@@ -74,7 +74,7 @@ pub async fn active(State(state): State<AppState>, QueryParams(q): QueryParams<Q
     let tgids = id_list(&q, &["tgid", "tgids"]);
     let body = blocking(&state, move |c| {
         let systems = system_filter(&q, &systems(c)?);
-        let rows: Vec<CallRow> = active_calls(c)
+        let rows: Vec<CallRow> = active_calls(c, now_ms())
             .map_err(StoreError::from)?
             .into_iter()
             .filter(|r| systems.is_empty() || systems.contains(&r.system_id.0))
