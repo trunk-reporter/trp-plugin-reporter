@@ -98,6 +98,14 @@ async fn every_spec_path_is_served_or_declared_out_of_scope() {
         for (method, _) in ops.as_mapping().expect("operations") {
             let method = method.as_str().expect("method");
             let Ok(m) = Method::from_bytes(method.to_uppercase().as_bytes()) else { continue };
+            if concrete == "/events/stream" {
+                // Never ends: take the head only.
+                use tower::ServiceExt;
+                let req = axum::http::Request::builder().method(m).uri("/api/v1/events/stream").body(axum::body::Body::empty()).expect("request");
+                let res = app.clone().oneshot(req).await.expect("router is infallible");
+                assert_eq!(res.status(), 200, "the event stream answers at once");
+                continue;
+            }
             let (s, v) = request(&app, m, &format!("/api/v1{concrete}")).await;
             // A routed handler may 404 a missing row (the store is empty); only the fallback's "no endpoint" 404 means unrouted.
             let unrouted = s == 404 && v["error"].as_str().is_some_and(|e| e.starts_with("no endpoint "));

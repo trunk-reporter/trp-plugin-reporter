@@ -3,6 +3,7 @@
 
 pub mod calls;
 pub mod health;
+pub mod sse;
 pub mod stats;
 pub mod systems;
 pub mod talkgroups;
@@ -12,7 +13,7 @@ pub mod units;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::{OriginalUri, Request, State};
@@ -79,6 +80,8 @@ pub struct AppState {
     pub version: &'static str,
     pub host: HostStatus,
     pub pages: Arc<Pages>,
+    /// How often an idle event stream gets a keepalive comment.
+    pub keepalive: Duration,
 }
 
 impl AppState {
@@ -94,6 +97,7 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION"),
             host,
             pages: Arc::new(Pages::empty()),
+            keepalive: sse::KEEPALIVE,
         }
     }
 }
@@ -143,7 +147,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/analytics/decode-rates",
     "/trunking-messages",
     "/console-messages",
-    "/events/stream",
     "/audio/live",
     "/audio/jitter",
     "/query",
@@ -185,6 +188,7 @@ pub fn router(state: AppState) -> Router {
         .route("/stats", get(stats::stats))
         .route("/stats/rates", get(stats::rates))
         .route("/recorders", get(stats::recorders))
+        .route("/events/stream", get(sse::stream))
         .route("/calls", get(calls::list))
         .route("/calls/active", get(calls::active))
         .route("/calls/{id}", get(calls::one))
