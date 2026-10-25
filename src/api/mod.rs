@@ -1,6 +1,7 @@
 //! tr-engine's REST API under `/api/v1`: shared state, the router, the token
 //! guard, and the query-parameter rules every endpoint shares.
 
+pub mod calls;
 pub mod health;
 pub mod systems;
 pub mod talkgroups;
@@ -113,21 +114,13 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/auth/keys/{id}/any",
     "/users",
     "/users/{id}",
-    "/talkgroups/{id}/calls",
     "/talkgroup-directory",
     "/talkgroup-directory/import",
     "/unit-tags/import",
-    "/units/{id}/calls",
     "/unit-tag-suggestions",
     "/unit-tag-suggestions/{id}",
     "/unit-tag-suggestions/{id}/approve",
     "/unit-tag-suggestions/{id}/dismiss",
-    "/calls",
-    "/calls/active",
-    "/calls/{id}",
-    "/calls/{id}/audio",
-    "/calls/{id}/frequencies",
-    "/calls/{id}/transmissions",
     "/calls/{id}/transcription",
     "/calls/{id}/transcriptions",
     "/calls/{id}/transcribe",
@@ -184,11 +177,19 @@ pub fn router(state: AppState) -> Router {
         .route("/talkgroups/encryption-stats", get(talkgroups::encryption_stats))
         .route("/talkgroups/{id}", get(talkgroups::one).patch(not_implemented))
         .route("/talkgroups/{id}/units", get(talkgroups::units))
+        .route("/talkgroups/{id}/calls", get(calls::talkgroup_calls))
         .route("/units", get(units::list))
         .route("/units/{id}", get(units::one).patch(not_implemented))
         .route("/units/{id}/events", get(units::events))
+        .route("/units/{id}/calls", get(calls::unit_calls))
         .route("/unit-events", get(units::unit_events))
-        .route("/unit-affiliations", get(units::affiliations));
+        .route("/unit-affiliations", get(units::affiliations))
+        .route("/calls", get(calls::list))
+        .route("/calls/active", get(calls::active))
+        .route("/calls/{id}", get(calls::one))
+        .route("/calls/{id}/audio", get(calls::audio))
+        .route("/calls/{id}/frequencies", get(calls::call_frequencies))
+        .route("/calls/{id}/transmissions", get(calls::call_transmissions));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }

@@ -16,10 +16,10 @@ use serde_json::{Value, json};
 use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, UnitEvent};
 
 use crate::affiliations::{Affiliations, Names};
-use crate::api::types::UnitEvent as ApiUnitEvent;
+use crate::api::types::{Call as ApiCall, UnitEvent as ApiUnitEvent};
 use crate::bus::{Bus, EventKind, NewEvent};
 use crate::config::Config;
-use crate::store::calls::{CallRow, NewCall, call_by_id, call_concluded, call_ended, call_started};
+use crate::store::calls::{NewCall, call_by_id, call_concluded, call_ended, call_started};
 use crate::store::recorder::insert_recorder_state;
 use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity};
 use crate::store::talkgroups::{TgTags, tag_talkgroup, touch_talkgroup};
@@ -67,14 +67,10 @@ fn record_start_ms(r: &CallRecord) -> i64 {
     if r.start_time_ms != 0 { r.start_time_ms } else { r.start_time * 1000 }
 }
 
-/// The bus payload for `call_*` events. Task 14 replaces it with the API's `Call`.
-fn call_json(row: &CallRow) -> Value {
-    json!({"call_id": row.id.0, "system_id": row.system_id.0, "tgid": row.tgid, "start_ms": row.start_ms, "call_state": row.state})
-}
-
 /// A `call_*` bus event for the call's row as it is now.
 fn call_event(conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Result<Option<NewEvent>> {
-    Ok(call_by_id(conn, id)?.map(|row| NewEvent {
+    let Some(row) = call_by_id(conn, id)? else { return Ok(None) };
+    Ok(Some(NewEvent {
         kind,
         sub_type: None,
         system_id: Some(row.system_id.0),
@@ -82,7 +78,7 @@ fn call_event(conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Resul
         tgid: Some(row.tgid),
         unit_id: None,
         emergency: row.emergency,
-        data: call_json(&row).to_string(),
+        data: serde_json::to_string(&ApiCall::from_row(conn, &row)?).unwrap_or_default(),
     }))
 }
 
@@ -660,7 +656,16 @@ mod tests {
         assert_eq!(events[1].unit_id, Some(10));
         assert_eq!(events[3].unit_id, Some(20));
         let data: Value = serde_json::from_str(&events[4].data).unwrap();
-        assert_eq!((data["call_id"].as_i64(), data["call_state"].as_str(), data["tgid"].as_u64()), (Some(1), Some("concluded"), Some(101)));
+        assert_eq!((data["call_id"].as_i64(), data["call_state"].as_str(), data["tgid"].as_u64()), (Some(1), Some("completed"), Some(101)));
+        // The call events carry the API's `Call`.
+        let start: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(
+            (start["call_id"].as_i64(), start["tgid"].as_u64(), start["call_state"].as_str(), start["recorded"].as_bool()),
+            (Some(1), Some(101), Some("recording"), Some(true))
+        );
+        assert!(time::OffsetDateTime::parse(start["start_time"].as_str().unwrap(), &time::format_description::well_known::Rfc3339).is_ok());
+        assert_eq!(data["audio_url"].as_str(), Some("/api/v1/calls/1/audio"));
+        assert_eq!(data["units"].as_array().map(Vec::len), Some(2));
         assert_eq!(r.captured.output().results(), vec![(path, Outcome::Ok, String::new(), String::new())]);
         assert!(r.ingest.live.is_empty());
     }

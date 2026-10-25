@@ -10,10 +10,14 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 use crate::affiliations::AffiliationEntry;
-use crate::store::StoreError;
+use crate::store::calls::{CallRow, FrequencyRow, TransmissionRow, frequencies, transmissions, units_of};
 use crate::store::systems::{SiteRow, SystemRow};
+use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
+use crate::store::units::unit;
 use crate::store::units::{UnitEventRow, UnitRow};
+use crate::store::{StoreError, now_ms};
+use rusqlite::Connection;
 
 /// The spec's `Error`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -537,4 +541,224 @@ mod tests {
             ]})
         );
     }
+}
+
+/// The spec's `CallTransmission`: one unit key-up in a call.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CallTransmission {
+    pub src: u32,
+    pub tag: String,
+    pub time: String,
+    pub pos: f64,
+    pub duration: f64,
+    /// 0 or 1.
+    pub emergency: i64,
+    /// Not recorded by the plugin.
+    pub signal_system: &'static str,
+}
+
+impl CallTransmission {
+    pub fn from_row(row: &TransmissionRow) -> CallTransmission {
+        CallTransmission {
+            src: row.unit,
+            tag: row.tag.clone(),
+            time: rfc3339(row.time_ms),
+            pos: row.pos_s,
+            duration: row.len_s,
+            emergency: i64::from(row.emergency),
+            signal_system: "",
+        }
+    }
+}
+
+/// The spec's `CallFrequency`: a stretch of the call on one frequency.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CallFrequency {
+    pub freq: u64,
+    pub time: String,
+    pub pos: f64,
+    pub len: f64,
+    pub error_count: u64,
+    pub spike_count: u64,
+}
+
+impl CallFrequency {
+    pub fn from_row(row: &FrequencyRow) -> CallFrequency {
+        CallFrequency {
+            freq: row.freq_hz,
+            time: rfc3339(row.time_ms),
+            pos: row.pos_s,
+            len: row.len_s,
+            error_count: row.error_count,
+            spike_count: row.spike_count,
+        }
+    }
+}
+
+/// The spec's `CallUnit`: a radio heard on the call.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CallUnit {
+    pub system_id: i64,
+    pub unit_id: u32,
+    pub alpha_tag: String,
+}
+
+/// The spec's `Call`, with every field the plugin can fill. Transcription
+/// fields other than `has_transcription` are left out (they are optional).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Call {
+    pub call_id: i64,
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_short_name: Option<String>,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub tg_description: String,
+    pub tg_tag: String,
+    pub tg_group: String,
+    pub start_time: String,
+    pub stop_time: Option<String>,
+    /// Seconds; elapsed so far while the call is recording.
+    pub duration: f64,
+    pub audio_url: Option<String>,
+    pub audio_type: String,
+    pub freq: u64,
+    pub freq_error: i64,
+    pub signal_db: Option<f64>,
+    pub noise_db: Option<f64>,
+    pub error_count: u64,
+    pub spike_count: u64,
+    pub call_state: &'static str,
+    pub emergency: bool,
+    pub encrypted: bool,
+    pub analog: bool,
+    pub conventional: bool,
+    pub phase2_tdma: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tdma_slot: Option<u8>,
+    pub recorded: bool,
+    pub not_recorded_reason: Option<String>,
+    pub decrypted: bool,
+    pub algid: Option<u8>,
+    pub key_id: Option<u16>,
+    pub priority: u8,
+    pub duplex: bool,
+    pub packet: bool,
+    /// The other talkgroups the call was patched to.
+    pub patched_tgids: Vec<u32>,
+    pub src_list: Vec<CallTransmission>,
+    pub freq_list: Vec<CallFrequency>,
+    pub unit_ids: Vec<u32>,
+    pub units: Vec<CallUnit>,
+    pub has_transcription: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<Value>,
+}
+
+impl Call {
+    /// The call with its system and site names, transmissions, frequencies and units.
+    pub fn from_row(conn: &Connection, row: &CallRow) -> rusqlite::Result<Call> {
+        let system = system_by_id(conn, row.system_id)?;
+        let site = match row.site_id {
+            Some(s) => site_by_id(conn, s)?,
+            None => None,
+        };
+        let src_list: Vec<CallTransmission> = transmissions(conn, row.id)?.iter().map(CallTransmission::from_row).collect();
+        let freq_list = frequencies(conn, row.id)?.iter().map(CallFrequency::from_row).collect();
+        let unit_ids = units_of(conn, row.id)?;
+        let units = unit_ids
+            .iter()
+            .map(|&u| {
+                Ok(CallUnit { system_id: row.system_id.0, unit_id: u, alpha_tag: unit(conn, row.system_id, u)?.map(|r| r.alpha_tag).unwrap_or_default() })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let recording = row.state == "recording";
+        let duration = match row.length_ms {
+            Some(ms) => ms as f64 / 1000.0,
+            None if recording => (now_ms() - row.start_ms).max(0) as f64 / 1000.0,
+            None => 0.0,
+        };
+        let concluded = row.state == "concluded";
+        let audio_url = (row.recorded && concluded && row.audio_path.is_some()).then(|| format!("/api/v1/calls/{}/audio", row.id.0));
+        Ok(Call {
+            call_id: row.id.0,
+            system_id: row.system_id.0,
+            system_name: system.as_ref().map(display_name).unwrap_or_default(),
+            sysid: hex(system.as_ref().and_then(|s| s.sysid)),
+            site_id: row.site_id.map(|s| s.0),
+            site_short_name: site.map(|s| s.name),
+            tgid: row.tgid,
+            tg_alpha_tag: row.tg_alpha_tag.clone(),
+            tg_description: row.tg_description.clone(),
+            tg_tag: row.tg_tag.clone(),
+            tg_group: row.tg_group.clone(),
+            start_time: rfc3339(row.start_ms),
+            stop_time: row.end_ms.map(rfc3339),
+            duration,
+            audio_url,
+            audio_type: row.audio_type.clone(),
+            freq: row.freq_hz.unwrap_or(0),
+            freq_error: row.freq_error,
+            signal_db: row.signal,
+            noise_db: row.noise,
+            error_count: row.error_count,
+            spike_count: row.spike_count,
+            call_state: match row.state.as_str() {
+                "recording" => "recording",
+                "ended" => "stopped",
+                _ => "completed",
+            },
+            emergency: row.emergency,
+            encrypted: row.encrypted,
+            analog: row.analog,
+            conventional: system.as_ref().is_some_and(|s| s.kind == "conventional"),
+            phase2_tdma: row.phase2_tdma,
+            tdma_slot: row.tdma_slot,
+            recorded: row.recorded,
+            not_recorded_reason: row.not_recorded_reason.clone(),
+            decrypted: row.decrypted,
+            algid: row.algid,
+            key_id: row.key_id,
+            priority: row.priority,
+            duplex: row.duplex,
+            packet: row.packet,
+            patched_tgids: row.patched_tgids.iter().copied().filter(|&t| t != row.tgid).collect(),
+            src_list,
+            freq_list,
+            unit_ids,
+            units,
+            has_transcription: false,
+            metadata_json: row.metadata_json.as_deref().and_then(|t| serde_json::from_str(t).ok()),
+        })
+    }
+}
+
+#[derive(Serialize)]
+pub struct CallListResponse {
+    pub calls: Vec<Call>,
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+#[derive(Serialize)]
+pub struct ActiveCallListResponse {
+    pub calls: Vec<Call>,
+    pub total: usize,
+}
+
+#[derive(Serialize)]
+pub struct CallFrequencyListResponse {
+    pub frequencies: Vec<CallFrequency>,
+    pub total: usize,
+}
+
+#[derive(Serialize)]
+pub struct CallTransmissionListResponse {
+    pub transmissions: Vec<CallTransmission>,
+    pub total: usize,
 }
