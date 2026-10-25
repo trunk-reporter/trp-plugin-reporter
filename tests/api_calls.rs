@@ -175,6 +175,14 @@ async fn active_calls_are_the_ones_still_recording() {
     assert!(call["duration"].as_f64().unwrap() > 0.0);
     assert_eq!(call["patched_tgids"], serde_json::json!([202]));
 
+    for (query, total) in
+        [("tgid=101", 1), ("tgid=202", 0), ("sysid=3ab", 1), ("sysid=ffff", 0), ("emergency=false", 1), ("emergency=true", 0), ("encrypted=true", 0)]
+    {
+        let (st, v) = get(&app, &format!("/api/v1/calls/active?{query}")).await;
+        assert_eq!((st, v["total"].as_i64()), (StatusCode::OK, Some(total)), "{query}");
+        assert_eq!(v["calls"].as_array().unwrap().len() as i64, total);
+    }
+
     // It is also in the list and by id, and /calls/active is not a call id.
     let (_, v) = get(&app, &format!("/api/v1/calls/{}", id.0)).await;
     assert_eq!(v["call_state"], "recording");

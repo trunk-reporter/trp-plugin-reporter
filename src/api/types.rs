@@ -732,7 +732,7 @@ impl Call {
             unit_ids,
             units,
             has_transcription: false,
-            metadata_json: row.metadata_json.as_deref().and_then(|t| serde_json::from_str(t).ok()),
+            metadata_json: row.metadata_json.as_deref().and_then(|t| serde_json::from_str(t).ok()).filter(Value::is_object),
         })
     }
 }

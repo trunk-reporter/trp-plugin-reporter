@@ -69,9 +69,18 @@ pub async fn list(State(state): State<AppState>, QueryParams(q): QueryParams<Que
     Ok(Json(body))
 }
 
-pub async fn active(State(state): State<AppState>) -> Result<Json<ActiveCallListResponse>, ApiError> {
-    let body = blocking(&state, |c| {
-        let rows = active_calls(c).map_err(StoreError::from)?;
+pub async fn active(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<ActiveCallListResponse>, ApiError> {
+    let (emergency, encrypted) = (flag(&q, "emergency")?, flag(&q, "encrypted")?);
+    let tgids = id_list(&q, &["tgid", "tgids"]);
+    let body = blocking(&state, move |c| {
+        let systems = system_filter(&q, &systems(c)?);
+        let rows: Vec<CallRow> = active_calls(c)
+            .map_err(StoreError::from)?
+            .into_iter()
+            .filter(|r| systems.is_empty() || systems.contains(&r.system_id.0))
+            .filter(|r| tgids.is_empty() || tgids.contains(&r.tgid))
+            .filter(|r| emergency.is_none_or(|e| r.emergency == e) && encrypted.is_none_or(|e| r.encrypted == e))
+            .collect();
         let calls = calls_of(c, &rows)?;
         Ok(ActiveCallListResponse { total: calls.len(), calls })
     })
@@ -109,7 +118,8 @@ pub async fn call_transmissions(State(state): State<AppState>, Path(id): Path<St
 async fn audio_file(capture_dir: &FsPath, audio_path: &str) -> Option<PathBuf> {
     let root = tokio::fs::canonicalize(capture_dir).await.ok()?;
     let file = tokio::fs::canonicalize(capture_dir.join(audio_path)).await.ok()?;
-    (file.starts_with(&root) && file.is_file()).then_some(file)
+    let is_file = tokio::fs::metadata(&file).await.map(|m| m.is_file()).unwrap_or(false);
+    (file.starts_with(&root) && is_file).then_some(file)
 }
 
 /// `GET /calls/{id}/audio`: the file, with range requests.
