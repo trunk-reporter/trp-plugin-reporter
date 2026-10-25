@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::{OriginalUri, Request, State};
+use axum::http::Method;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -195,8 +196,9 @@ async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {
     ApiError::NotImplemented(uri.path().to_string())
 }
 
-async fn not_found(OriginalUri(uri): OriginalUri) -> ApiError {
-    ApiError::NotFound(format!("no endpoint {}", uri.path()))
+/// Unrouted paths. The `"no endpoint "` prefix tells this 404 from a handler's (a missing row).
+async fn not_found(method: Method, OriginalUri(uri): OriginalUri) -> ApiError {
+    ApiError::NotFound(format!("no endpoint {method} {}", uri.path()))
 }
 
 /// Equal, in time that depends only on the lengths.

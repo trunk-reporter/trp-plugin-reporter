@@ -85,7 +85,8 @@ impl IntoResponse for ApiError {
             ApiError::NotImplemented(path) => {
                 ApiError::error(StatusCode::NOT_IMPLEMENTED, "not_implemented", "not available in the Trunk Recorder Pro plugin", path)
             }
-            ApiError::Internal(m) => ApiError::error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error", m),
+            // The store's message (SQL text) stays out of the response.
+            ApiError::Internal(_) => ApiError::error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error", ""),
         }
     }
 }
@@ -122,7 +123,7 @@ mod tests {
         assert_eq!(parts(ApiError::NotFound("n".into())).await.0, 404);
         assert_eq!(parts(ApiError::Unauthorized).await, (401, json!({"code": "unauthorized", "error": "missing or invalid token"})));
         let (s, v) = parts(StoreError("disk".into()).into()).await;
-        assert_eq!((s, v), (500, json!({"code": "internal_error", "error": "internal error", "detail": "disk"})));
+        assert_eq!((s, v), (500, json!({"code": "internal_error", "error": "internal error"})));
         let (s, v) = parts(ApiError::NotImplemented("/api/v1/query".into())).await;
         assert_eq!((s, &v["code"], &v["detail"]), (501, &json!("not_implemented"), &json!("/api/v1/query")));
         let matches = vec![(1, "ohmarcs".into(), "3AB".into()), (2, "fire-conv".into(), "0".into())];

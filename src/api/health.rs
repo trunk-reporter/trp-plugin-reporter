@@ -64,7 +64,7 @@ pub async fn auth_init(State(state): State<AppState>) -> Json<AuthInit> {
 }
 
 pub async fn openapi() -> impl IntoResponse {
-    ([(CONTENT_TYPE, "application/yaml")], SPEC)
+    ([(CONTENT_TYPE, "text/yaml")], SPEC)
 }
 
 pub async fn pages(State(state): State<AppState>) -> Response {

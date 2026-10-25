@@ -61,7 +61,7 @@ async fn pages_and_the_spec_are_served() {
     assert_eq!((s, v), (StatusCode::OK, Value::Array(vec![])));
     let (s, headers, body) = get_with(&app, "/api/v1/openapi.yaml", &[]).await;
     assert_eq!(s, 200);
-    assert_eq!(headers["content-type"], "application/yaml");
+    assert_eq!(headers["content-type"], "text/yaml");
     assert_eq!(&body[..], include_str!("../openapi/openapi.yaml").as_bytes());
 }
 
@@ -82,6 +82,7 @@ async fn unknown_paths_are_404() {
     let (s, v) = get(&app().0, "/api/v1/nothing").await;
     assert_eq!(s, 404);
     assert_eq!(v["code"], "not_found");
+    assert_eq!(v["error"], "no endpoint GET /api/v1/nothing");
     assert_schema(&v, "Error");
 }
 
@@ -97,8 +98,10 @@ async fn every_spec_path_is_served_or_declared_out_of_scope() {
         for (method, _) in ops.as_mapping().expect("operations") {
             let method = method.as_str().expect("method");
             let Ok(m) = Method::from_bytes(method.to_uppercase().as_bytes()) else { continue };
-            let s = request(&app, m, &format!("/api/v1{concrete}")).await.0;
-            if s == 404 || s == 405 {
+            let (s, v) = request(&app, m, &format!("/api/v1{concrete}")).await;
+            // A routed handler may 404 a missing row (the store is empty); only the fallback's "no endpoint" 404 means unrouted.
+            let unrouted = s == 404 && v["error"].as_str().is_some_and(|e| e.starts_with("no endpoint "));
+            if unrouted || s == 405 {
                 missing.push(format!("{method} {path} → {s}"));
             }
         }
