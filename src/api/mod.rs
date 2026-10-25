@@ -28,7 +28,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::affiliations::Affiliations;
 use crate::bus::Bus;
 use crate::store::Store;
-use crate::web::Pages;
+use crate::web::{self, Pages};
 
 pub use types::{ApiError, hex, rfc3339};
 
@@ -85,7 +85,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Started now, this crate's version, no pages yet. An empty token is no token.
+    /// Started now, this crate's version, the embedded pages. An empty token is no token.
     pub fn new(store: Store, bus: Bus, affiliations: Affiliations, capture_dir: PathBuf, token: Option<String>, host: HostStatus) -> AppState {
         AppState {
             store,
@@ -96,7 +96,7 @@ impl AppState {
             started: Instant::now(),
             version: env!("CARGO_PKG_VERSION"),
             host,
-            pages: Arc::new(Pages::empty()),
+            pages: Arc::new(Pages::scan()),
             keepalive: sse::KEEPALIVE,
         }
     }
@@ -160,6 +160,26 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/admin/storage/purge/{table}",
 ];
 
+/// The first path segments (under `/api/v1`) the embedded pages may call; a page
+/// that calls another is not shipped (spec C8).
+pub const SERVED_PREFIXES: &[&str] = &[
+    "health",
+    "auth-init",
+    "systems",
+    "sites",
+    "p25-systems",
+    "talkgroups",
+    "units",
+    "unit-events",
+    "unit-affiliations",
+    "calls",
+    "stats",
+    "recorders",
+    "events",
+    "pages",
+    "openapi.yaml",
+];
+
 /// `/api/v1/*` paths that need no token.
 const OPEN: &[&str] = &["/api/v1/health", "/api/v1/auth-init", "/api/v1/pages", "/api/v1/openapi.yaml"];
 
@@ -198,7 +218,12 @@ pub fn router(state: AppState) -> Router {
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }
-    Router::new().nest("/api/v1", api.fallback(not_found)).layer(middleware::from_fn_with_state(state.clone(), require_token)).with_state(state)
+    Router::new()
+        .nest("/api/v1", api.fallback(not_found))
+        .route("/", get(web::index))
+        .fallback_service(get(web::file))
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .with_state(state)
 }
 
 async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {

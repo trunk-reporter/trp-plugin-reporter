@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="auth.js?v=1"></script>
+  <meta name="card-title" content="Drift">
+  <meta name="card-description" content="Logarithmic timeline — events drift from now into the past">
+  <meta name="card-order" content="1">
+  <title>Drift — tr-engine</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;700&family=Outfit:wght@200;300;400;500;600;700;800;900&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Karla:wght@200;300;400;500&family=Syne:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&family=VT323&family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet">
+
+  <script src="theme-config.js"></script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-weight: var(--font-weight-body);
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      transition: background 0.5s, color 0.4s;
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before {
+      content: ''; position: fixed; inset: 0;
+      background-image: var(--grid-bg);
+      background-size: var(--grid-size) var(--grid-size);
+      pointer-events: none; z-index: 0;
+    }
+    body::after {
+      content: ''; position: fixed; inset: 0;
+      background: var(--scanlines);
+      pointer-events: none; z-index: 9999;
+    }
+    .vignette-overlay {
+      position: fixed; inset: 0;
+      background: var(--vignette);
+      pointer-events: none; z-index: 9998;
+      transition: background 0.6s;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      padding: 8px 40px;
+      flex-shrink: 0;
+      position: relative; z-index: 1;
+      background: color-mix(in srgb, var(--bg) 92%, transparent);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      transition: background 0.5s, border-color 0.4s;
+    }
+
+    .mode-selector {
+      display: flex;
+      gap: 2px;
+      margin-left: 8px;
+    }
+    .mode-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .mode-btn:first-child { border-radius: var(--radius-xs) 0 0 var(--radius-xs); }
+    .mode-btn:last-child { border-radius: 0 var(--radius-xs) var(--radius-xs) 0; }
+    .mode-btn:not(:first-child) { border-left: none; }
+    .mode-btn:hover { color: var(--text); border-color: var(--accent); }
+    .mode-btn.active {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .mode-btn.active + .mode-btn { border-left-color: var(--accent); }
+
+    .toolbar .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    .toolbar .pulse-dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success), 0 0 20px color-mix(in srgb, var(--success) 20%, transparent);
+    }
+
+    .toolbar .pulse-dot.disconnected {
+      background: var(--danger);
+      box-shadow: 0 0 8px var(--danger);
+      animation: none;
+    }
+
+    .toolbar .pulse-dot.connecting {
+      background: var(--warning);
+      box-shadow: 0 0 8px var(--warning);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.7); }
+    }
+
+    .stats {
+      display: flex;
+      gap: 32px;
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--text-faint);
+      letter-spacing: 0.05em;
+    }
+
+    .stats .stat-value {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .legend {
+      display: flex;
+      gap: 24px;
+      padding: 0 40px;
+      margin-left: 160px;
+      flex-shrink: 0;
+      position: relative; z-index: 1;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-faint);
+      letter-spacing: 0.04em;
+    }
+
+    .legend-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .lane-labels {
+      width: 160px;
+      flex-shrink: 0;
+      overflow: hidden;
+      position: relative;
+      z-index: 4;
+    }
+
+    .lane-label {
+      position: absolute;
+      left: 16px;
+      right: 8px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transform: translateY(-50%);
+      transition: top 0.3s ease;
+    }
+
+    .lane-label .lane-tgid {
+      color: var(--text-faint);
+      font-size: 9px;
+      margin-left: 4px;
+    }
+
+    .timeline-area {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .timeline-area::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        color-mix(in srgb, var(--accent) 1%, transparent) 3px,
+        color-mix(in srgb, var(--accent) 1%, transparent) 4px
+      );
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    .now-zone {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 80px;
+      height: 100%;
+      background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 100%);
+      border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .now-label {
+      position: absolute;
+      left: 10px;
+      top: 10px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--accent);
+      opacity: 0.6;
+    }
+
+    .decay-zone {
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 160px;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, var(--bg));
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    #timeline {
+      width: 100%;
+      height: 100%;
+    }
+
+    .evt-icon {
+      cursor: pointer;
+      transition: font-size 0.15s ease;
+    }
+
+    .time-markers {
+      position: relative;
+      height: 20px;
+      margin-left: 160px;
+      margin-right: 40px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-faint);
+      letter-spacing: 0.06em;
+      flex-shrink: 0;
+    }
+
+    .time-marker {
+      position: absolute;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      z-index: 100;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      max-width: 320px;
+    }
+
+    .tooltip.visible { opacity: 1; }
+    .tooltip .tt-type { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 4px; }
+    .tooltip .tt-detail { color: var(--text); font-size: 11px; margin-bottom: 2px; }
+    .tooltip .tt-age { color: var(--text-muted); font-size: 10px; }
+
+    .theme-label {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      z-index: 10000; font-family: var(--font-display); font-size: 12px;
+      letter-spacing: 3px; text-transform: uppercase; color: var(--accent);
+      background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border); padding: 10px 24px; border-radius: 100px;
+      transition: all 0.5s; pointer-events: none; opacity: 0;
+    }
+    .theme-label.show { opacity: 1; }
+
+    @media (max-width: 600px) {
+      .toolbar { padding: 6px 12px; gap: 8px; }
+      .stats { gap: 12px; font-size: 10px; }
+      .legend { margin-left: 0; padding: 0 12px; gap: 12px; flex-wrap: wrap; }
+      .lane-labels { width: 80px; }
+      .time-markers { margin-left: 80px; margin-right: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="vignette-overlay"></div>
+
+<div class="toolbar">
+  <div class="pulse-dot connecting" id="status-dot"></div>
+  <div class="mode-selector" id="mode-selector">
+    <button class="mode-btn" data-mode="20m">20m</button>
+    <button class="mode-btn" data-mode="1h">1h</button>
+    <button class="mode-btn" data-mode="5h">5h</button>
+  </div>
+  <div class="stats">
+    <span>Talkgroups <span class="stat-value" id="stat-tg">0</span></span>
+    <span>Events <span class="stat-value" id="stat-count">0</span></span>
+    <span>Rate <span class="stat-value" id="stat-rate">0</span>/min</span>
+    <span><span class="stat-value" id="stat-fps">0</span>fps</span>
+    <span><span class="stat-value" id="stat-ft">0</span>ms</span>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background: var(--cyan);"></div>call start</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--cyan);"></div>call update</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--success);"></div>call end</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--magenta);"></div>unit call</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--magenta-bright);"></div>unit end</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--info);"></div>unit on</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--danger);"></div>unit off</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--warning);"></div>join/loc</div>
+  <div class="legend-item"><div class="legend-dot" style="background: var(--warning);"></div>signal</div>
+</div>
+
+<div class="main">
+  <div class="lane-labels" id="lane-labels"></div>
+  <div class="timeline-area">
+    <div class="now-zone"><div class="now-label">now</div></div>
+    <div class="decay-zone"></div>
+    <svg id="timeline"></svg>
+  </div>
+</div>
+
+<div class="time-markers" id="time-markers"></div>
+
+<div class="tooltip" id="tooltip">
+  <div class="tt-type" id="tt-type"></div>
+  <div class="tt-detail" id="tt-detail"></div>
+  <div class="tt-age" id="tt-age"></div>
+</div>
+
+<div class="theme-label" id="themeLabel"></div>
+
+<script>
+  // ── Config ──────────────────────────────────────────
+  // Resolve a CSS custom property to its computed value
+  function themeColor(varName) {
+    return getComputedStyle(document.documentElement).getPropertyValue('--' + varName).trim();
+  }
+
+  // Style definitions reference CSS vars — resolved at event creation time
+  const EVENT_STYLE_DEFS = {
+    call_start:  { icon: '\u25C6', varName: 'cyan' },
+    call_update: { icon: '\u25C7', varName: 'cyan' },
+    call_end:    { icon: '\u25CF', varName: 'success' },
+  };
+
+  const UNIT_STYLE_DEFS = {
+    call:     { icon: '\u25B2', varName: 'magenta' },
+    end:      { icon: '\u25BD', varName: 'magenta-bright' },
+    on:       { icon: '\u25B3', varName: 'info' },
+    join:     { icon: '\u25C9', varName: 'warning' },
+    off:      { icon: '\u25BD', varName: 'danger' },
+    location: { icon: '\u25CB', varName: 'warning' },
+    ackresp:  { icon: '\u25AB', varName: 'text-muted' },
+    data:     { icon: '\u25AB', varName: 'text-muted' },
+    signal:   { icon: '\u25C8', varName: 'warning' },
+  };
+  const UNIT_DEFAULT_DEF = { icon: '\u25B2', varName: 'magenta' };
+
+  function resolveStyle(def) {
+    const c = themeColor(def.varName);
+    return { icon: def.icon, color: c, shadow: `0 0 6px ${c}` };
+  }
+
+  const SSE_TYPES = ['call_start', 'call_update', 'call_end', 'unit_event'];
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const MIN_BAND_PX = 24;     // minimum lane height — drives max visible lanes
+  const OVERFLOW_LANES = 10;   // extra tracked beyond visible (keeps history for returning tgs)
+
+  // ── Mode presets ──
+  const MODES = {
+    '20m': {
+      maxAge: 1200, eventCap: 2500, logK: 20,
+      labels: [
+        { sec: 5, label: '5s' }, { sec: 15, label: '15s' }, { sec: 30, label: '30s' },
+        { sec: 60, label: '1m' }, { sec: 120, label: '2m' }, { sec: 300, label: '5m' },
+        { sec: 600, label: '10m' }, { sec: 1200, label: '20m' },
+      ],
+    },
+    '1h': {
+      maxAge: 3600, eventCap: 5000, logK: 40,
+      labels: [
+        { sec: 30, label: '30s' }, { sec: 60, label: '1m' }, { sec: 120, label: '2m' },
+        { sec: 300, label: '5m' }, { sec: 600, label: '10m' }, { sec: 1200, label: '20m' },
+        { sec: 2400, label: '40m' }, { sec: 3600, label: '1h' },
+      ],
+    },
+    '5h': {
+      maxAge: 18000, eventCap: 7500, logK: 80,
+      labels: [
+        { sec: 60, label: '1m' }, { sec: 300, label: '5m' }, { sec: 600, label: '10m' },
+        { sec: 1800, label: '30m' }, { sec: 3600, label: '1h' }, { sec: 7200, label: '2h' },
+        { sec: 10800, label: '3h' }, { sec: 18000, label: '5h' },
+      ],
+    },
+  };
+  let currentMode = localStorage.getItem('drift-mode') || '20m';
+  if (!MODES[currentMode]) currentMode = '20m';
+  let LANE_STALE_MS = MODES[currentMode].maxAge * 1000;
+
+  // ── State ───────────────────────────────────────────
+  const events = [];       // event data objects
+  const domNodes = [];     // parallel array: { g, icon, trail } cached DOM refs
+  let eventCounter = 0;
+  let dirty = false;       // set when enter/exit needed
+  let eventSource = null;
+  let everConnected = false;
+  let recentTimes = [];
+
+  // Call linking: connect markers belonging to the same call
+  const callLinkMap = new Map(); // callId → SVGLineElement
+  let callLinkGroup = null;
+
+  // Talkgroup lanes
+  const tgLaneMap = new Map();
+  let nextLane = 0;
+  let lanesDirty = false;
+
+  // Layout
+  let width = 0, height = 0;
+
+  // ── DOM refs ────────────────────────────────────────
+  const svgEl = document.getElementById('timeline');
+  const statusDot = document.getElementById('status-dot');
+  const tooltip = document.getElementById('tooltip');
+  const ttType = document.getElementById('tt-type');
+  const ttDetail = document.getElementById('tt-detail');
+  const ttAge = document.getElementById('tt-age');
+  const laneLabelsEl = document.getElementById('lane-labels');
+  const statCount = document.getElementById('stat-count');
+  const statRate = document.getElementById('stat-rate');
+  const statTg = document.getElementById('stat-tg');
+
+  // ── Logarithmic drift scale ─────────────────────────
+  let rangeStart = 40, rangeSpan = 0;
+
+  function xScale(ageSec) {
+    const mode = MODES[currentMode];
+    const t = Math.max(0, Math.min(1, (ageSec - 1) / (mode.maxAge - 1)));
+    const k = mode.logK;
+    return rangeStart + (Math.log(1 + t * k) / Math.log(1 + k)) * rangeSpan;
+  }
+
+  // ── Lane geometry ───────────────────────────────────
+  function getMaxVisibleLanes() {
+    const usable = height - 40;
+    return Math.max(5, Math.floor(usable / MIN_BAND_PX));
+  }
+
+  function laneY(lane) {
+    if (nextLane === 0) return height / 2;
+    const padding = 20;
+    const usable = height - padding * 2;
+    const band = Math.min(40, usable / nextLane);
+    const total = band * nextLane;
+    return (height - total) / 2 + lane * band + band / 2;
+  }
+
+  function laneBandwidth() {
+    if (nextLane === 0) return 30;
+    return Math.min(40, (height - 40) / nextLane);
+  }
+
+  function resortLanes() {
+    const maxVisible = getMaxVisibleLanes();
+    const maxTracked = maxVisible + OVERFLOW_LANES;
+
+    // Hard-evict talkgroups off the visible timeline
+    const staleCutoff = Date.now() - LANE_STALE_MS;
+    for (const [tg, entry] of tgLaneMap) {
+      if (entry.lastSeen < staleCutoff) tgLaneMap.delete(tg);
+    }
+
+    // If still over tracked cap, evict least recently seen
+    if (tgLaneMap.size > maxTracked) {
+      const byRecency = [...tgLaneMap.entries()].sort((a, b) => b[1].lastSeen - a[1].lastSeen);
+      const toRemove = byRecency.slice(maxTracked);
+      for (const [tg] of toRemove) tgLaneMap.delete(tg);
+    }
+
+    // Pick visible set: most recently active, up to maxVisible
+    const allEntries = [...tgLaneMap.entries()];
+    const byRecency = allEntries.sort((a, b) => b[1].lastSeen - a[1].lastSeen);
+    const visible = byRecency.slice(0, maxVisible);
+    const hidden = byRecency.slice(maxVisible);
+
+    // Sort visible lanes by tgid
+    visible.sort((a, b) => a[0] - b[0]);
+    visible.forEach(([, entry], i) => { entry.lane = i; entry.visible = true; });
+    hidden.forEach(([, entry]) => { entry.lane = -1; entry.visible = false; });
+
+    nextLane = visible.length;
+
+    // Update existing events
+    for (const ev of events) {
+      const entry = tgLaneMap.get(ev.tgid);
+      if (entry) { ev.lane = entry.lane; ev.hidden = !entry.visible; }
+      else { ev.hidden = true; }
+    }
+    lanesDirty = true;
+  }
+
+  function getLane(tgid, label) {
+    if (!tgid) tgid = 0;
+    if (tgLaneMap.has(tgid)) {
+      const entry = tgLaneMap.get(tgid);
+      entry.lastSeen = Date.now();
+      if (label && label !== entry.label) { entry.label = label; lanesDirty = true; }
+      // Becoming active may promote from hidden to visible
+      if (!entry.visible) resortLanes();
+      return entry.lane;
+    }
+
+    tgLaneMap.set(tgid, { lane: 0, label: label || (tgid ? 'TG ' + tgid : 'Unknown'), lastSeen: Date.now(), visible: true });
+    resortLanes();
+    return tgLaneMap.get(tgid).lane;
+  }
+
+  // ── Resize ──────────────────────────────────────────
+  function resize() {
+    const rect = svgEl.parentElement.getBoundingClientRect();
+    width = rect.width;
+    height = rect.height;
+    svgEl.setAttribute('width', width);
+    svgEl.setAttribute('height', height);
+    rangeSpan = width + 60;
+    resortLanes(); // max visible lanes depends on height
+    updateTimeMarkers();
+    updateGrid();
+    updateLaneLabels();
+    drawLaneSeparators();
+  }
+
+  // ── Mode switching ─────────────────────────────────
+  function switchMode(key) {
+    if (!MODES[key] || key === currentMode) return;
+    currentMode = key;
+    localStorage.setItem('drift-mode', key);
+    LANE_STALE_MS = MODES[key].maxAge * 1000;
+    resortLanes();
+    rebuildGrid();
+    updateTimeMarkers();
+    updateLaneLabels();
+    drawLaneSeparators();
+    updateModeButtons();
+  }
+
+  function updateModeButtons() {
+    for (const btn of document.querySelectorAll('.mode-btn')) {
+      btn.classList.toggle('active', btn.dataset.mode === currentMode);
+    }
+  }
+
+  // ── Time markers ────────────────────────────────────
+  function getTimeLabels() { return MODES[currentMode].labels; }
+
+  function updateTimeMarkers() {
+    const labels = getTimeLabels();
+    const c = document.getElementById('time-markers');
+    c.innerHTML = '';
+    for (const t of labels) {
+      const x = xScale(t.sec);
+      if (x > 20 && x < width - 20) {
+        const el = document.createElement('div');
+        el.className = 'time-marker';
+        el.style.left = x + 'px';
+        el.textContent = t.label;
+        c.appendChild(el);
+      }
+    }
+  }
+
+  // ── Grid lines (rebuilt on mode switch / resize) ────
+  let gridGroup = null;
+
+  function rebuildGrid() {
+    if (gridGroup) gridGroup.remove();
+    gridGroup = document.createElementNS(SVG_NS, 'g');
+    const labels = getTimeLabels();
+    for (let i = 0; i < labels.length; i++) {
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.style.stroke = 'var(--border)';
+      line.setAttribute('stroke-width', '0.5');
+      line.setAttribute('stroke-dasharray', '2,6');
+      line.setAttribute('opacity', '0.4');
+      gridGroup.appendChild(line);
+    }
+    svgEl.appendChild(gridGroup);
+    updateGrid();
+  }
+
+  function updateGrid() {
+    if (!gridGroup) return;
+    const labels = getTimeLabels();
+    const lines = gridGroup.children;
+    for (let i = 0; i < labels.length && i < lines.length; i++) {
+      const x = xScale(labels[i].sec);
+      lines[i].setAttribute('x1', x);
+      lines[i].setAttribute('x2', x);
+      lines[i].setAttribute('y1', 0);
+      lines[i].setAttribute('y2', height);
+    }
+  }
+
+  // ── Lane separators ─────────────────────────────────
+  let sepGroup = null;
+
+  function drawLaneSeparators() {
+    if (sepGroup) sepGroup.remove();
+    sepGroup = document.createElementNS(SVG_NS, 'g');
+    const bw = laneBandwidth();
+    for (let i = 0; i < nextLane; i++) {
+      const y = laneY(i) - bw / 2;
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', 0);
+      line.setAttribute('x2', width);
+      line.setAttribute('y1', y);
+      line.setAttribute('y2', y);
+      line.style.stroke = 'var(--border)';
+      line.setAttribute('stroke-width', '0.5');
+      line.setAttribute('opacity', '0.3');
+      sepGroup.appendChild(line);
+    }
+    svgEl.appendChild(sepGroup);
+  }
+
+  // ── Lane labels ─────────────────────────────────────
+  function updateLaneLabels() {
+    laneLabelsEl.innerHTML = '';
+    for (const [tgid, entry] of tgLaneMap) {
+      if (!entry.visible) continue;
+      const el = document.createElement('div');
+      el.className = 'lane-label';
+      el.style.top = laneY(entry.lane) + 'px';
+      el.innerHTML = escHTML(entry.label) + (tgid ? `<span class="lane-tgid">${tgid}</span>` : '');
+      laneLabelsEl.appendChild(el);
+    }
+    statTg.textContent = tgLaneMap.size;
+  }
+
+  function escHTML(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ── Age formatting ──────────────────────────────────
+  function formatAge(sec) {
+    if (sec < 60) return `${Math.floor(sec)}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${(sec / 3600).toFixed(1)}h ago`;
+    return `${(sec / 86400).toFixed(1)}d ago`;
+  }
+
+  // ── Tooltip detail ──────────────────────────────────
+  function summarize(type, d) {
+    switch (type) {
+      case 'call_start':
+      case 'call_update':
+        return (d.tg_alpha_tag || 'TG ' + d.tgid) +
+          (d.emergency ? ' EMERGENCY' : '') +
+          (d.encrypted ? ' [enc]' : '') +
+          (d.freq ? ' ' + (d.freq / 1e6).toFixed(4) + ' MHz' : '');
+      case 'call_end':
+        return (d.tg_alpha_tag || 'TG ' + d.tgid) +
+          (d.duration ? ' ' + d.duration.toFixed(1) + 's' : '') +
+          (d.freq ? ' ' + (d.freq / 1e6).toFixed(4) + ' MHz' : '');
+      case 'unit_event':
+        return (d.event_type || '?') + ' ' +
+          (d.unit_alpha_tag || 'Unit ' + d.unit_id) +
+          (d.tg_alpha_tag ? ' on ' + d.tg_alpha_tag : '');
+      default:
+        return '';
+    }
+  }
+
+  // ── Event coalescing ────────────────────────────────
+  const COALESCE_WINDOW = 6000;
+  const coalesceBuckets = new Map();
+
+  function coalesceCategory(type, data) {
+    if (type === 'call_start') return 'start';
+    if (type === 'call_end') return 'end';
+    if (type === 'call_update') return 'update';
+    if (type === 'unit_event') {
+      const sub = (data.event_type || '').toLowerCase();
+      if (sub === 'call') return 'start';
+      if (sub === 'end') return 'end';
+    }
+    return null;
+  }
+
+  function shouldCoalesce(type, data, tgid, timeMs, style, detail, varName) {
+    if (type === 'unit_event') {
+      const sub = (data.event_type || '').toLowerCase();
+      const unitId = data.unit_id || 0;
+      const dedupPrefix = 'u:' + tgid + ':' + unitId + ':' + sub + ':';
+      const bucket = Math.floor(timeMs / COALESCE_WINDOW);
+      for (let b = bucket - 1; b <= bucket + 1; b++) {
+        const existing = coalesceBuckets.get(dedupPrefix + b);
+        if (existing && Math.abs(existing.time - timeMs) <= COALESCE_WINDOW) return true;
+      }
+      coalesceBuckets.set(dedupPrefix + bucket, { time: timeMs, priority: 0, eventIdx: -1 });
+    }
+
+    const cat = coalesceCategory(type, data);
+    if (!cat) return false;
+
+    const priority = type === 'unit_event' ? 1 : 2;
+    const bucket = Math.floor(timeMs / COALESCE_WINDOW);
+    const prefix = tgid + ':' + cat + ':';
+
+    for (let b = bucket - 1; b <= bucket + 1; b++) {
+      const existing = coalesceBuckets.get(prefix + b);
+      if (!existing || Math.abs(existing.time - timeMs) > COALESCE_WINDOW) continue;
+
+      if (priority > existing.priority) {
+        const ev = events[existing.eventIdx];
+        if (ev) {
+          ev.icon = style.icon;
+          ev.color = style.color;
+          ev.shadow = style.shadow;
+          ev.varName = varName;
+          ev.detail = detail;
+          ev.type = type.replace(/_/g, ' ');
+          if (type !== 'unit_event') {
+            const lk = callLinkKeyForEvent(type, data);
+            if (lk) ev.callId = lk;
+          }
+          const node = domNodes[existing.eventIdx];
+          if (node) {
+            node.icon.textContent = style.icon;
+            node.icon.setAttribute('fill', style.color);
+            node.icon.style.textShadow = style.shadow;
+            node.trail.setAttribute('stroke', style.color);
+          }
+          existing.priority = priority;
+        }
+      }
+      return true;
+    }
+
+    const eventIdx = events.length;
+    coalesceBuckets.set(prefix + bucket, { time: timeMs, priority, eventIdx });
+
+    if (coalesceBuckets.size > 2000) {
+      const cutoff = Date.now() - MODES[currentMode].maxAge * 1000;
+      for (const [k, v] of coalesceBuckets) {
+        if (v.time < cutoff) coalesceBuckets.delete(k);
+      }
+    }
+
+    return false;
+  }
+
+  // ── Call linking ────────────────────────────────────
+  // One talkgroup = one call at a time. call_end closes whatever's open.
+  const openCallByTg = new Map();
+  let linkSeq = 0;
+
+  function callLinkKeyForEvent(type, data) {
+    const tgid = data.tgid;
+    if (!tgid) return null;
+    if (type === 'call_start') {
+      const key = tgid + ':' + (linkSeq++);
+      openCallByTg.set(tgid, key);
+      return key;
+    }
+    if (type === 'call_end') {
+      const key = openCallByTg.get(tgid);
+      openCallByTg.delete(tgid);
+      return key || tgid + ':' + (linkSeq++);
+    }
+    return openCallByTg.get(tgid) || null;
+  }
+
+  // ── Add event ───────────────────────────────────────
+  function addEvent(type, data) {
+    let styleDef;
+    if (type === 'unit_event') {
+      const sub = (data.event_type || '').toLowerCase();
+      styleDef = UNIT_STYLE_DEFS[sub] || UNIT_DEFAULT_DEF;
+    } else {
+      styleDef = EVENT_STYLE_DEFS[type];
+    }
+    if (!styleDef) return;
+    const style = resolveStyle(styleDef);
+
+    const tgid = data.tgid || 0;
+    if (!tgid) return;
+
+    const tgLabel = data.tg_alpha_tag || 'TG ' + tgid;
+
+    let time;
+    const ts = (type === 'call_end' ? data.stop_time : null) || data.start_time || data.time || data.log_time;
+    if (ts) { time = typeof ts === 'number' && ts > 1e12 ? ts : typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime(); }
+    if (!time || isNaN(time)) { time = Date.now(); }
+
+    const detail = summarize(type, data);
+
+    if (shouldCoalesce(type, data, tgid, time, style, detail, styleDef.varName)) {
+      recentTimes.push(Date.now());
+      recentTimes = recentTimes.filter(t => Date.now() - t < 60000);
+      statRate.textContent = recentTimes.length;
+      return;
+    }
+
+    const lane = getLane(tgid, tgLabel);
+
+    const displayType = type === 'unit_event' && data.event_type
+      ? 'unit ' + data.event_type
+      : type.replace(/_/g, ' ');
+
+    events.push({
+      id: eventCounter++,
+      time, type: displayType, lane, tgid,
+      icon: style.icon,
+      color: style.color,
+      shadow: style.shadow,
+      varName: styleDef.varName,
+      jitter: (Math.random() - 0.5) * 0.3,
+      size: 10 + Math.random() * 6,
+      detail: detail,
+      emergency: !!data.emergency,
+      callId: (type !== 'unit_event') ? callLinkKeyForEvent(type, data) : null,
+    });
+    domNodes.push(null);
+
+    if (events.length > MODES[currentMode].eventCap) {
+      const old = domNodes.shift();
+      events.shift();
+      if (old && old.g.parentNode) old.g.parentNode.removeChild(old.g);
+    }
+
+    dirty = true;
+
+    recentTimes.push(Date.now());
+    recentTimes = recentTimes.filter(t => Date.now() - t < 60000);
+    statRate.textContent = recentTimes.length;
+  }
+
+  // ── Phase 1: Reconcile (enter/exit) ──
+  function reconcile() {
+    const now = Date.now();
+
+    let i = 0;
+    while (i < events.length) {
+      if ((now - events[i].time) / 1000 >= MODES[currentMode].maxAge) {
+        const node = domNodes[i];
+        if (node && node.g.parentNode) node.g.parentNode.removeChild(node.g);
+        events.splice(i, 1);
+        domNodes.splice(i, 1);
+      } else {
+        i++;
+      }
+    }
+
+    for (let i = 0; i < events.length; i++) {
+      if (domNodes[i]) continue;
+
+      const ev = events[i];
+      const g = document.createElementNS(SVG_NS, 'g');
+
+      const trail = document.createElementNS(SVG_NS, 'line');
+      trail.setAttribute('x1', '0');
+      trail.setAttribute('y1', '0');
+      trail.setAttribute('x2', '-20');
+      trail.setAttribute('y2', '0');
+      trail.setAttribute('stroke', ev.color);
+      trail.setAttribute('stroke-opacity', '0.15');
+      trail.setAttribute('stroke-width', '1');
+      g.appendChild(trail);
+
+      const icon = document.createElementNS(SVG_NS, 'text');
+      icon.setAttribute('text-anchor', 'middle');
+      icon.setAttribute('dominant-baseline', 'central');
+      icon.setAttribute('font-size', ev.size);
+      icon.setAttribute('fill', ev.color);
+      icon.style.textShadow = ev.shadow;
+      icon.classList.add('evt-icon');
+      icon.textContent = ev.icon;
+
+      const evRef = ev;
+      g.addEventListener('mouseenter', function(e) {
+        icon.setAttribute('font-size', evRef.size * 1.5);
+        const ageSec = (Date.now() - evRef.time) / 1000;
+        ttType.textContent = evRef.type.replace(/_/g, ' ');
+        ttType.style.color = evRef.color;
+        ttDetail.textContent = evRef.detail;
+        ttAge.textContent = formatAge(ageSec);
+        tooltip.classList.add('visible');
+      });
+      g.addEventListener('mousemove', function(e) {
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top = (e.clientY - 50) + 'px';
+      });
+      g.addEventListener('mouseleave', function() {
+        icon.setAttribute('font-size', evRef.size);
+        tooltip.classList.remove('visible');
+      });
+
+      g.appendChild(icon);
+      g.setAttribute('opacity', '0');
+      svgEl.appendChild(g);
+
+      requestAnimationFrame(() => { g.setAttribute('opacity', '1'); g.style.transition = 'opacity 0.5s ease'; });
+
+      domNodes[i] = { g, icon, trail };
+    }
+
+    statCount.textContent = events.length;
+    dirty = false;
+  }
+
+  // ── Phase 2: Update positions ──
+  function updatePositions() {
+    const now = Date.now();
+    const bw = laneBandwidth();
+    const mode = MODES[currentMode];
+    const fadeStart = mode.maxAge * 0.7;
+
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      const node = domNodes[i];
+      if (!node) continue;
+
+      if (ev.hidden) { node.g.style.display = 'none'; continue; }
+
+      const ageSec = Math.max(1, (now - ev.time) / 1000);
+
+      // Throttle old events: update every 10th frame only
+      if (ageSec > 300 && frame % 10 !== 0) continue;
+
+      const x = xScale(ageSec);
+
+      // Viewport culling: hide events past the right edge
+      if (x > width + 40) { node.g.style.display = 'none'; continue; }
+      node.g.style.display = '';
+
+      const baseY = laneY(ev.lane);
+      const y = baseY + ev.jitter * bw;
+
+      let opacity = 1;
+      if (ageSec > fadeStart) opacity = Math.max(0.08, 1 - (ageSec - fadeStart) / (mode.maxAge - fadeStart));
+      if (ev.emergency) opacity = Math.max(opacity, 0.6);
+
+      const trailLen = Math.min(40, ageSec * 0.05);
+
+      node.g.setAttribute('transform', `translate(${x},${y})`);
+      node.g.style.opacity = opacity;
+      node.trail.setAttribute('x2', -trailLen);
+      node.trail.setAttribute('stroke-opacity', Math.min(0.25, ageSec * 0.001));
+    }
+  }
+
+  // ── Phase 3: Update call link lines ─────────────────
+  let cachedLinkColor = '';
+  let linkColorFrame = -1;
+
+  function updateCallLinks() {
+    const now = Date.now();
+    const mode = MODES[currentMode];
+    const fadeStart = mode.maxAge * 0.7;
+    if (frame !== linkColorFrame) { cachedLinkColor = themeColor('cyan'); linkColorFrame = frame; }
+
+    const groups = new Map();
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (!ev.callId || ev.hidden) continue;
+      if (!groups.has(ev.callId)) groups.set(ev.callId, []);
+      groups.get(ev.callId).push(ev);
+    }
+
+    for (const [callId, el] of callLinkMap) {
+      if (!groups.has(callId)) {
+        el.remove();
+        callLinkMap.delete(callId);
+      }
+    }
+
+    for (const [callId, evts] of groups) {
+      const hasEnd = evts.some(e => e.type === 'call end');
+
+      let minX = Infinity, maxX = -Infinity;
+      let y = 0, opacitySum = 0;
+      for (const ev of evts) {
+        const ageSec = Math.max(1, (now - ev.time) / 1000);
+        const x = xScale(ageSec);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        y = laneY(ev.lane);
+        let op = 1;
+        if (ageSec > fadeStart) op = Math.max(0.08, 1 - (ageSec - fadeStart) / (mode.maxAge - fadeStart));
+        opacitySum += op;
+      }
+
+      if (!hasEnd) {
+        const newestTime = Math.max(...evts.map(e => e.time));
+        if ((now - newestTime) / 1000 < 120) {
+          minX = rangeStart;
+        }
+      }
+
+      let el = callLinkMap.get(callId);
+      if (!el) {
+        el = document.createElementNS(SVG_NS, 'line');
+        el.setAttribute('stroke-width', '1.5');
+        el.setAttribute('stroke-linecap', 'round');
+        callLinkGroup.appendChild(el);
+        callLinkMap.set(callId, el);
+      }
+
+      const avgOpacity = opacitySum / evts.length;
+      el.style.display = '';
+      el.setAttribute('x1', minX);
+      el.setAttribute('y1', y);
+      el.setAttribute('x2', maxX);
+      el.setAttribute('y2', y);
+      const linkAlpha = hasEnd ? avgOpacity * 0.18 : avgOpacity * 0.25;
+      el.setAttribute('stroke', `color-mix(in srgb, ${cachedLinkColor} ${Math.round(linkAlpha * 100)}%, transparent)`);
+    }
+  }
+
+  // ── Animation loop ──────────────────────────────────
+  let prevLaneCount = 0;
+  let frame = 0;
+  let lastFrameTime = performance.now();
+  let ftAccum = 0;
+  let ftSamples = 0;
+  const statFps = document.getElementById('stat-fps');
+  const statFt = document.getElementById('stat-ft');
+
+  function tick(now) {
+    const dt = now - lastFrameTime;
+    lastFrameTime = now;
+    ftAccum += dt;
+    ftSamples++;
+    ++frame;
+
+    if (dirty || frame % 30 === 0) {
+      reconcile();
+      const avgFt = ftAccum / ftSamples;
+      statFps.textContent = Math.round(1000 / avgFt);
+      statFt.textContent = avgFt.toFixed(1);
+      ftAccum = 0;
+      ftSamples = 0;
+    }
+
+    if (lanesDirty || nextLane !== prevLaneCount) {
+      updateLaneLabels();
+      drawLaneSeparators();
+      prevLaneCount = nextLane;
+      lanesDirty = false;
+    }
+
+    updatePositions();
+    updateCallLinks();
+    requestAnimationFrame(tick);
+  }
+
+  // ── SSE Connection ──────────────────────────────────
+  function setStatus(state) { statusDot.className = 'pulse-dot ' + state; if (window.ehSetNetworkStatus) window.ehSetNetworkStatus(state); }
+
+  function connect() {
+    if (eventSource) eventSource.close();
+
+    const params = new URLSearchParams();
+    params.set('types', SSE_TYPES.join(','));
+    const url = '/api/v1/events/stream?' + params.toString();
+
+    setStatus('connecting');
+    everConnected = false;
+    eventSource = new EventSource(url);
+
+    eventSource.onopen = () => { setStatus('connected'); everConnected = true; };
+
+    eventSource.onerror = () => {
+      if (eventSource.readyState === EventSource.CLOSED) {
+        setStatus('disconnected');
+      } else {
+        setStatus('connecting');
+      }
+    };
+
+    SSE_TYPES.forEach(type => {
+      eventSource.addEventListener(type, (e) => {
+        try { addEvent(type, JSON.parse(e.data)); }
+        catch (err) { console.error('parse error', type, err); }
+      });
+    });
+  }
+
+  // ── Init ────────────────────────────────────────────
+  rebuildGrid();
+  callLinkGroup = document.createElementNS(SVG_NS, 'g');
+  svgEl.appendChild(callLinkGroup);
+  resize();
+  updateModeButtons();
+  connect();
+  requestAnimationFrame(tick);
+
+  window.addEventListener('resize', resize);
+  document.getElementById('mode-selector').addEventListener('click', (e) => {
+    const btn = e.target.closest('.mode-btn');
+    if (btn) switchMode(btn.dataset.mode);
+  });
+
+  // Re-resolve event colors when theme changes
+  window.addEventListener('themechange', () => {
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (!ev.varName) continue;
+      const c = themeColor(ev.varName);
+      ev.color = c;
+      ev.shadow = `0 0 6px ${c}`;
+      const node = domNodes[i];
+      if (node) {
+        node.icon.setAttribute('fill', c);
+        node.icon.style.textShadow = ev.shadow;
+        node.trail.setAttribute('stroke', c);
+      }
+    }
+    // Invalidate cached link color so next frame picks up new theme
+    linkColorFrame = -1;
+  });
+</script>
+<script src="theme-engine.js?v=2"></script>
+</body>
+</html>

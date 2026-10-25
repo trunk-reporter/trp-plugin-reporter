@@ -50,15 +50,17 @@ async fn a_token_guards_the_api_but_not_health_or_pages() {
     for open in ["/api/v1/health", "/api/v1/auth-init", "/api/v1/pages", "/api/v1/openapi.yaml"] {
         assert_eq!(get(&app, open).await.0, 200, "{open}");
     }
-    // Outside /api/ nothing is guarded (no page is served until Task 17: 404, not 401).
-    assert_eq!(get(&app, "/index.html").await.0, 404);
+    // Outside /api/ nothing is guarded: the pages are open.
+    assert_eq!(get(&app, "/index.html").await.0, 200);
+    assert_eq!(get(&app, "/nope.html").await.0, 404);
 }
 
 #[tokio::test]
 async fn pages_and_the_spec_are_served() {
     let app = app().0;
     let (s, v) = get(&app, "/api/v1/pages").await;
-    assert_eq!((s, v), (StatusCode::OK, Value::Array(vec![])));
+    assert_eq!(s, StatusCode::OK);
+    assert!(v.as_array().is_some_and(|pages| !pages.is_empty()), "the embedded pages are listed: {v}");
     let (s, headers, body) = get_with(&app, "/api/v1/openapi.yaml", &[]).await;
     assert_eq!(s, 200);
     assert_eq!(headers["content-type"], "text/yaml");

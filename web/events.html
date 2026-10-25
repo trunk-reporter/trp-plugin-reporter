@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="auth.js?v=1"></script>
+<meta name="card-title" content="Live Events">
+<meta name="card-description" content="Real-time SSE event stream with type filtering">
+<meta name="card-order" content="2">
+<title>Live Events — tr-engine</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;700&family=Outfit:wght@200;300;400;500;600;700;800;900&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Karla:wght@200;300;400;500&family=Syne:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&family=VT323&family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet">
+
+<script src="theme-config.js"></script>
+
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-mono);
+    font-weight: var(--font-weight-body);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: background 0.5s, color 0.4s;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: var(--grid-bg);
+    background-size: var(--grid-size) var(--grid-size);
+    pointer-events: none; z-index: 0;
+  }
+  body::after {
+    content: ''; position: fixed; inset: 0;
+    background: var(--scanlines);
+    pointer-events: none; z-index: 9999;
+  }
+  .vignette-overlay {
+    position: fixed; inset: 0;
+    background: var(--vignette);
+    pointer-events: none; z-index: 9998;
+    transition: background 0.6s;
+  }
+
+  .toolbar {
+    position: relative; z-index: 1;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    transition: background 0.5s, border-color 0.4s;
+  }
+
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .status-dot.disconnected { background: var(--danger); }
+  .status-dot.connecting { background: var(--warning); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filters label {
+    display: flex; align-items: center; gap: 4px; cursor: pointer;
+    padding: 2px 8px; border-radius: var(--radius-xs);
+    font-size: 12px; border: 1px solid var(--border);
+    color: var(--text-mid);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .filters label:hover { background: var(--bg-surface); border-color: var(--border-hover); }
+  .filters input[type="checkbox"] { accent-color: var(--accent); }
+
+  .stats { margin-left: auto; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+  #events {
+    position: relative; z-index: 1;
+    padding: 4px 0; overflow-y: auto; flex: 1;
+  }
+
+  .event {
+    padding: 4px 16px; display: flex; gap: 10px; align-items: baseline;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    line-height: 1.5;
+  }
+  .event:hover { background: var(--bg-surface); }
+
+  .event-time { color: var(--text-muted); flex-shrink: 0; width: 85px; }
+  .event-type {
+    flex-shrink: 0; width: 120px; padding: 1px 6px;
+    border-radius: var(--radius-xs); text-align: center;
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+  }
+  .event-detail { color: var(--text); word-break: break-word; }
+  .event-detail .dim { color: var(--text-muted); }
+  .event-detail .val { color: var(--accent); }
+  .event-detail .emergency { color: var(--danger); font-weight: 700; }
+
+  .type-call_start  { background: color-mix(in srgb, var(--info) 20%, transparent); color: var(--info); }
+  .type-call_end    { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }
+  .type-call_update { background: color-mix(in srgb, var(--cyan) 15%, transparent); color: var(--cyan); }
+  .type-call_alert  { background: color-mix(in srgb, #cc2200 25%, transparent); color: #ff4422; font-weight: 700; }
+  .type-unit_event  { background: color-mix(in srgb, var(--magenta) 20%, transparent); color: var(--magenta); }
+  .type-recorder_update { background: color-mix(in srgb, var(--warning) 15%, transparent); color: var(--warning); }
+  .type-rate_update { background: var(--bg-tile); color: var(--text-muted); }
+  .type-trunking_message { background: var(--bg-tile); color: var(--text-muted); }
+  .type-console     { background: var(--bg-tile); color: var(--text-faint); }
+
+  .theme-label {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 10000; font-family: var(--font-display); font-size: 12px;
+    letter-spacing: 3px; text-transform: uppercase; color: var(--accent);
+    background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border); padding: 10px 24px; border-radius: 100px;
+    transition: all 0.5s; pointer-events: none; opacity: 0;
+  }
+  .theme-label.show { opacity: 1; }
+
+  /* ── Mobile ── */
+  @media (max-width: 600px) {
+    .toolbar {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 8px 12px;
+    }
+    .filters { gap: 6px; }
+    .filters label { padding: 4px 8px; font-size: 11px; }
+    .stats { margin-left: 0; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="vignette-overlay"></div>
+
+<div class="toolbar">
+  <div class="status">
+    <div id="status-dot" class="status-dot connecting"></div>
+    <span id="status-text">connecting...</span>
+  </div>
+  <div class="filters">
+    <label><input type="checkbox" value="call_start" checked> call_start</label>
+    <label><input type="checkbox" value="call_end" checked> call_end</label>
+    <label><input type="checkbox" value="call_alert" checked> call_alert</label>
+    <label><input type="checkbox" value="unit_event" checked> unit_event</label>
+    <label><input type="checkbox" value="recorder_update" checked> recorder_update</label>
+    <label><input type="checkbox" value="rate_update"> rate_update</label>
+    <label><input type="checkbox" value="trunking_message"> trunking_message</label>
+    <label><input type="checkbox" value="console"> console</label>
+  </div>
+  <div class="stats"><span id="event-count">0</span> events</div>
+</div>
+
+<div id="events"></div>
+
+<div class="theme-label" id="themeLabel"></div>
+
+<script>
+const eventsEl = document.getElementById('events');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const eventCountEl = document.getElementById('event-count');
+const MAX_EVENTS = 200;
+let eventSource = null;
+let lastEventId = '';
+let totalCount = 0;
+let everConnected = false;
+
+const EVENT_TYPES = ['call_start', 'call_end', 'call_update', 'unit_event', 'recorder_update', 'rate_update', 'trunking_message', 'console'];
+
+function getSelectedTypes() {
+  const checked = new Set(Array.from(document.querySelectorAll('.filters input:checked')).map(cb => cb.value));
+  // call_alert is a unit_event subtype — always subscribe to unit_event so we receive them,
+  // then filter client-side in addEvent based on the call_alert checkbox.
+  const ssTypes = new Set(checked);
+  if (checked.has('call_alert')) ssTypes.add('unit_event');
+  ssTypes.delete('call_alert');
+  return [...ssTypes];
+}
+
+function setStatus(state, text) {
+  statusDot.className = 'status-dot ' + state;
+  statusText.textContent = text;
+  if (window.ehSetNetworkStatus) window.ehSetNetworkStatus(state);
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  return d.toLocaleTimeString();
+}
+
+function formatDetail(type, d) {
+  switch (type) {
+    case 'call_start':
+    case 'call_update':
+      return `<span class="val">${esc(d.tg_alpha_tag || 'TG ' + d.tgid)}</span>` +
+        ` <span class="dim">tgid=</span>${d.tgid}` +
+        ` <span class="dim">freq=</span>${(d.freq / 1e6).toFixed(4)}` +
+        (d.emergency ? ' <span class="emergency">EMERGENCY</span>' : '') +
+        (d.encrypted ? ' <span class="dim">[encrypted]</span>' : '');
+    case 'call_end':
+      return `<span class="val">${esc(d.tg_alpha_tag || 'TG ' + d.tgid)}</span>` +
+        ` <span class="dim">tgid=</span>${d.tgid}` +
+        ` <span class="dim">dur=</span>${d.duration ? d.duration.toFixed(1) + 's' : '?'}` +
+        ` <span class="dim">freq=</span>${(d.freq / 1e6).toFixed(4)}` +
+        (d.emergency ? ' <span class="emergency">EMERGENCY</span>' : '');
+    case 'call_alert':
+      return `<span class="val">${esc(d.unit_alpha_tag || 'Unit ' + d.unit_id)}</span>` +
+        ` <span class="dim">→</span>` +
+        ` <span class="val">${esc(d.target_unit_alpha_tag || 'Unit ' + d.target_unit)}</span>`;
+    case 'unit_event':
+      return `<span class="dim">${esc(d.event_type || '?')}</span>` +
+        ` <span class="val">${esc(d.unit_alpha_tag || 'Unit ' + d.unit_id)}</span>` +
+        (d.tgid ? ` <span class="dim">tg=</span>${esc(d.tg_alpha_tag || String(d.tgid))}` : '');
+    case 'recorder_update':
+      return `<span class="dim">rec${d.rec_num}</span>` +
+        ` <span class="val">${esc(d.rec_state || '?')}</span>` +
+        (d.freq ? ` <span class="dim">freq=</span>${(d.freq / 1e6).toFixed(4)}` : '') +
+        (d.tg_alpha_tag ? ` <span class="dim">tg=</span>${esc(d.tg_alpha_tag)}` : '') +
+        (d.system_id ? ` <span class="dim">sys=</span>${d.system_id}` : '');
+    case 'rate_update':
+      return `<span class="dim">decode_rate=</span><span class="val">${d.decode_rate != null ? d.decode_rate : '?'}</span>` +
+        (d.control_channel ? ` <span class="dim">cc=</span>${(d.control_channel / 1e6).toFixed(4)}` : '');
+    case 'trunking_message':
+      return `<span class="dim">${esc(d.opcode_type || d.trunk_msg_type || '?')}</span>` +
+        (d.opcode_desc ? ` ${esc(d.opcode_desc)}` : '');
+    case 'console':
+      return esc(d.log_msg || JSON.stringify(d));
+    default:
+      return esc(JSON.stringify(d));
+  }
+}
+
+function esc(s) {
+  if (s == null) return '';
+  const div = document.createElement('div');
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
+function addEvent(type, data) {
+  // Remap call_alert from unit_event subtype to its own display type
+  let displayType = type;
+  if (type === 'unit_event' && data.event_type === 'call_alert') {
+    displayType = 'call_alert';
+  }
+
+  // Client-side filter: check if displayType is enabled
+  const checked = new Set(Array.from(document.querySelectorAll('.filters input:checked')).map(cb => cb.value));
+  if (displayType === 'call_alert' && !checked.has('call_alert')) return;
+  if (displayType === 'unit_event' && !checked.has('unit_event')) return;
+
+  totalCount++;
+  eventCountEl.textContent = totalCount;
+
+  const row = document.createElement('div');
+  row.className = 'event';
+
+  const now = new Date();
+  const time = formatTime(data.start_time || data.time || data.log_time) || now.toLocaleTimeString();
+
+  row.innerHTML =
+    `<span class="event-time">${time}</span>` +
+    `<span class="event-type type-${displayType}">${displayType.replace(/_/g, ' ')}</span>` +
+    `<span class="event-detail">${formatDetail(displayType, data)}</span>`;
+
+  eventsEl.insertBefore(row, eventsEl.firstChild);
+
+  // Trim excess
+  while (eventsEl.children.length > MAX_EVENTS) {
+    eventsEl.removeChild(eventsEl.lastChild);
+  }
+}
+
+function connect() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  const types = getSelectedTypes();
+  const params = new URLSearchParams();
+  if (types.length > 0 && types.length < EVENT_TYPES.length) {
+    params.set('types', types.join(','));
+  }
+  const qs = params.toString();
+  const url = '/api/v1/events/stream' + (qs ? '?' + qs : '');
+
+  setStatus('connecting', 'connecting...');
+  everConnected = false;
+  eventSource = new EventSource(url);
+
+  eventSource.onopen = () => {
+    setStatus('connected', 'connected');
+    everConnected = true;
+  };
+
+  eventSource.onerror = () => {
+    if (eventSource.readyState === EventSource.CLOSED) {
+      setStatus('disconnected', 'disconnected');
+    } else {
+      setStatus('connecting', 'reconnecting...');
+    }
+  };
+
+  // Listen for each event type
+  EVENT_TYPES.forEach(type => {
+    eventSource.addEventListener(type, (e) => {
+      lastEventId = e.lastEventId;
+      try {
+        const data = JSON.parse(e.data);
+        addEvent(type, data);
+      } catch (err) {
+        console.error('parse error', type, err);
+      }
+    });
+  });
+}
+
+// Reconnect on filter change
+document.querySelectorAll('.filters input').forEach(cb => {
+  cb.addEventListener('change', () => connect());
+});
+
+connect();
+</script>
+<script src="theme-engine.js?v=2"></script>
+</body>
+</html>
