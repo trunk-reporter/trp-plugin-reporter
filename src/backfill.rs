@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 use time::OffsetDateTime;
 use trunk_recorder_plugin::CallRecord;
@@ -23,6 +24,8 @@ pub struct BackfillReport {
     pub files: u64,
     pub ingested: u64,
     pub skipped_known: u64,
+    /// Files written after the walk began: the live `call.concluded` stores those.
+    pub skipped_new: u64,
     pub bad: u64,
 }
 
@@ -47,10 +50,13 @@ fn read_record(path: &Path) -> Result<CallRecord, String> {
 /// Ingest the call files under `capture_dir/<short_name>/<Y>/<M>/<D>/` that the
 /// store lacks. Once a walk has finished ([`COMPLETE_KEY`]), day folders older
 /// than the day before each system's newest stored call are skipped.
-/// `progress` gets the file count every 100 files. A set `stop` ends the walk
-/// early, without marking it complete.
+/// Files modified after the walk began are left to the live `call.concluded`.
+/// Every 100 files the walk waits for the store to catch up, then tells
+/// `progress` the file count. A set `stop` ends the walk early, without
+/// marking it complete.
 pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, String)], progress: &mut dyn FnMut(u64), stop: &AtomicBool) -> BackfillReport {
     let mut report = BackfillReport::default();
+    let began = SystemTime::now();
     let stopped = || stop.load(Ordering::Relaxed);
     let completed_before = ingest.store().read(|c| meta_get(c, COMPLETE_KEY)).ok().flatten().is_some();
     for (system, short_name) in systems {
@@ -82,7 +88,13 @@ pub fn backfill(ingest: &mut Ingest, capture_dir: &Path, systems: &[(SystemId, S
                 }
                 report.files += 1;
                 if report.files % 100 == 0 {
+                    // The writer's queue stays short, so live writes are not stuck behind the walk.
+                    ingest.store().flush();
                     progress(report.files);
+                }
+                if entry.metadata().ok().and_then(|m| m.modified().ok()).is_some_and(|t| t > began) {
+                    report.skipped_new += 1;
+                    continue;
                 }
                 let json_path = stored_path(Some(capture_dir), path);
                 let key = json_path.strip_suffix(".json").unwrap_or(&json_path).to_string();
@@ -122,7 +134,7 @@ mod tests {
     use crate::bus::Bus;
     use crate::config::Config;
     use crate::store::Store;
-    use trunk_recorder_plugin::{CallRecord, NoConfig, System, testing};
+    use trunk_recorder_plugin::{CallRecord, Level, NoConfig, System, testing};
 
     fn rig(tag: &str) -> (Ingest, Store, std::path::PathBuf, testing::Captured) {
         let store = Store::in_memory();
@@ -150,10 +162,10 @@ mod tests {
         let systems = systems_of(&store);
         let first = backfill(&mut ingest, &dir, &systems, &mut |_| {}, &AtomicBool::new(false));
         store.flush();
-        assert_eq!(first, BackfillReport { files: 2, ingested: 2, skipped_known: 0, bad: 0 });
+        assert_eq!(first, BackfillReport { files: 2, ingested: 2, ..Default::default() });
         let second = backfill(&mut ingest, &dir, &systems, &mut |_| {}, &AtomicBool::new(false));
         store.flush();
-        assert_eq!(second, BackfillReport { files: 2, ingested: 0, skipped_known: 2, bad: 0 });
+        assert_eq!(second, BackfillReport { files: 2, skipped_known: 2, ..Default::default() });
         assert_eq!(count(&store), 2);
         let (path, audio, json): (String, Option<String>, Option<String>) = store
             .read(|c| c.query_row("SELECT path, audio_path, json_path FROM calls ORDER BY path LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))
@@ -171,9 +183,42 @@ mod tests {
         std::fs::write(day.join("999-1_1.json"), "{not json").unwrap();
         let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {}, &AtomicBool::new(false));
         store.flush();
-        assert_eq!(r, BackfillReport { files: 2, ingested: 1, skipped_known: 0, bad: 1 });
+        assert_eq!(r, BackfillReport { files: 2, ingested: 1, bad: 1, ..Default::default() });
         assert_eq!(count(&store), 1);
-        drop(captured);
+        let warnings: Vec<String> = captured.output().logs().into_iter().filter(|(l, _)| *l == Level::Warn).map(|(_, m)| m).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("999-1_1.json"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn a_file_written_after_the_walk_began_is_left_to_the_live_path() {
+        let (mut ingest, store, dir, _) = rig("backfill6");
+        let cc = testing::call(&dir, "sys1", 101);
+        let json = dir.join(format!("{}.json", cc.path));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3_600);
+        std::fs::File::options().write(true).open(&json).unwrap().set_modified(later).unwrap();
+        testing::call(&dir, "sys1", 102);
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| {}, &AtomicBool::new(false));
+        store.flush();
+        assert_eq!(r, BackfillReport { files: 2, ingested: 1, skipped_new: 1, ..Default::default() });
+        assert_eq!(count(&store), 1);
+    }
+
+    #[test]
+    fn the_walk_lets_the_store_catch_up_every_100_files() {
+        let (mut ingest, store, dir, _) = rig("backfill7");
+        let cc = testing::call(&dir, "sys1", 101);
+        let day = dir.join(&cc.path).parent().unwrap().to_path_buf();
+        for n in 0..250 {
+            let mut rec = cc.call.clone();
+            rec.call_num = n;
+            std::fs::write(day.join(format!("101-{n}_1.json")), serde_json::to_string(&rec).unwrap()).unwrap();
+        }
+        let mut queued = Vec::new();
+        let s = store.clone();
+        let r = backfill(&mut ingest, &dir, &systems_of(&store), &mut |_| queued.push(s.queue_len()), &AtomicBool::new(false));
+        assert_eq!((r.files, r.ingested), (251, 251));
+        assert_eq!(queued, vec![0, 0]);
     }
 
     /// A stored call on 2023-11-20 (not on disk); on disk, 2023-11-14 (an

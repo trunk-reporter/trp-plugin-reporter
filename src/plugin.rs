@@ -159,10 +159,13 @@ impl Plugin for Reporter {
         let bus = Bus::new(BUS_RING);
         let affiliations = Affiliations::new();
         let new_ingest = || -> Result<Ingest, String> {
-            Ok(Ingest::new(store.clone(), bus.clone(), affiliations.clone(), Some(host.clone()), &setup.systems)
+            let mut ingest = Ingest::new(store.clone(), bus.clone(), affiliations.clone(), Some(host.clone()), &setup.systems)
                 .map_err(|e| e.to_string())?
                 .with_capture_dir(setup.capture_dir.clone())
-                .with_host_name(&setup.host.name))
+                .with_host_name(&setup.host.name);
+            // Known systems and sites then never wait on the store (behind a backfill).
+            ingest.warm_caches().map_err(|e| e.to_string())?;
+            Ok(ingest)
         };
         let ingest = new_ingest()?;
         let recent = store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?;
@@ -215,8 +218,8 @@ impl Plugin for Reporter {
                     }
                     if report.ingested > 0 || report.bad > 0 {
                         host.info(format!(
-                            "backfill: {} calls added from {} files ({} already stored, {} unreadable)",
-                            report.ingested, report.files, report.skipped_known, report.bad
+                            "backfill: {} calls added from {} files ({} already stored, {} left to the recorder, {} unreadable)",
+                            report.ingested, report.files, report.skipped_known, report.skipped_new, report.bad
                         ));
                     }
                     host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store)));

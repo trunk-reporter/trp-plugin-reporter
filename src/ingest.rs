@@ -52,6 +52,8 @@ pub struct Ingest {
     sites: HashMap<(SystemId, String), SiteId>,
     live: HashMap<(u16, u32), Live>,
     dropped: Arc<AtomicU64>,
+    /// Systems and sites looked up by waiting on the store (not in the caches).
+    first_sights: u64,
 }
 
 /// A conventional system's events carry no site: its one site is named after the system.
@@ -235,12 +237,35 @@ impl Ingest {
             sites: HashMap::new(),
             live: HashMap::new(),
             dropped: Arc::new(AtomicU64::new(0)),
+            first_sights: 0,
         };
         for (index, id, short_name) in ids {
             ingest.by_index.insert(index, id);
             ingest.by_name.insert(short_name, id);
         }
         Ok(ingest)
+    }
+
+    /// Fill the system and site caches from the store, so a system or site
+    /// stored by an earlier run needs no waiting on the store when it is seen.
+    pub fn warm_caches(&mut self) -> Result<(), StoreError> {
+        type Rows = (Vec<(String, SystemId)>, Vec<(SystemId, String, SiteId)>);
+        let (systems, sites): Rows = self.store.read(|c| {
+            let systems = c.prepare("SELECT short_name, id FROM systems")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            let sites = c
+                .prepare("SELECT system_id, name, id FROM sites")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((systems, sites))
+        })?;
+        self.by_name.extend(systems);
+        self.sites.extend(sites.into_iter().map(|(system, name, id)| ((system, name), id)));
+        Ok(())
+    }
+
+    /// How many systems and sites were looked up by waiting on the store.
+    pub fn first_sights(&self) -> u64 {
+        self.first_sights
     }
 
     /// Where the recorder keeps calls: a concluded call's file paths are stored relative to it.
@@ -292,6 +317,7 @@ impl Ingest {
             return None;
         }
         let name = short_name.to_string();
+        self.first_sights += 1;
         match self.store.write_sync(move |c| ensure_system(c, &name, "", "", now_ms())) {
             Ok(id) => {
                 self.by_name.insert(short_name.to_string(), id);
@@ -311,6 +337,7 @@ impl Ingest {
             return Some(*id);
         }
         let owned = name.to_string();
+        self.first_sights += 1;
         match self.store.write_sync(move |c| ensure_site(c, system_id, &owned, now_ms())) {
             Ok(id) => {
                 self.sites.insert(key, id);
@@ -869,6 +896,27 @@ mod tests {
         assert_eq!(data["time"].as_str().map(|t| OffsetDateTime::parse(t, &Rfc3339).unwrap().unix_timestamp()), Some(T0));
         assert_eq!((data["tgid"].as_u64(), data["instance_id"].as_str()), (Some(101), Some("rig-host")));
         assert_eq!(r.ingest.dropped(), 1);
+    }
+
+    fn status_of(site: &str) -> HostMessage {
+        HostMessage::Status(Status {
+            time: T0 as f64,
+            systems: vec![SystemStatus { index: 0, short_name: "sys1".into(), site_name: site.into(), decode_rate: 40.0, ..Default::default() }],
+        })
+    }
+
+    #[test]
+    fn warmed_caches_need_no_waiting_for_known_sites() {
+        let mut r = rig();
+        r.store.write_sync(|c| ensure_site(c, SystemId(1), "east", 0)).unwrap();
+        r.ingest.warm_caches().unwrap();
+        r.ingest.handle(status_of("east"));
+        r.events();
+        assert_eq!(r.ingest.first_sights(), 0);
+        assert_eq!(r.count("SELECT count(*) FROM recorder_state"), 1);
+        // A site the store has never seen is still added, by waiting.
+        r.ingest.handle(status_of("west"));
+        assert_eq!(r.ingest.first_sights(), 1);
     }
 
     #[test]
