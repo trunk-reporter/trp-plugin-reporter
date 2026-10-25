@@ -3,6 +3,7 @@
 
 mod config;
 mod plugin;
+mod store;
 
 use std::path::PathBuf;
 
