@@ -129,15 +129,32 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "foreign_keys", true)
 }
 
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+/// Bring the store to [`SCHEMA_VERSION`], one version at a time, then apply
+/// `ensure.sql`. A store from a newer reporter is refused, not touched.
+fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let has: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')", [], |r| r.get(0))?;
+    let found: i64 = if has { conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))? } else { 0 };
+    if found > SCHEMA_VERSION {
+        return Err(StoreError(format!("this store was written by a newer reporter (schema {found}); upgrade reporter")));
+    }
     let tx = conn.unchecked_transaction()?;
-    if !has {
-        tx.execute_batch(SCHEMA)?;
-        tx.execute("INSERT INTO schema_version VALUES (?1)", [SCHEMA_VERSION])?;
+    let mut version = found;
+    while version < SCHEMA_VERSION {
+        match version {
+            // A new store: the whole of version 1.
+            0 => tx.execute_batch(SCHEMA)?,
+            // 1 => tx.execute_batch(include_str!("v2.sql"))?,
+            v => return Err(StoreError(format!("no migration from schema {v}"))),
+        }
+        version += 1;
+    }
+    if version != found {
+        tx.execute("DELETE FROM schema_version", [])?;
+        tx.execute("INSERT INTO schema_version VALUES (?1)", [version])?;
     }
     tx.execute_batch(ENSURE)?;
-    tx.commit()
+    tx.commit()?;
+    Ok(())
 }
 
 impl Store {
@@ -355,6 +372,20 @@ mod tests {
             .unwrap();
         assert_eq!(n, 10);
         assert_eq!(s.read(|c| c.query_row("SELECT version FROM schema_version", [], |r| r.get::<_, i64>(0))).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_store_from_a_newer_reporter_is_refused() {
+        let dir = trunk_recorder_plugin::testing::temp_dir("store");
+        let path = dir.join("engine.sqlite");
+        let s = Store::open(&path).unwrap();
+        s.write_sync(|c| c.execute("UPDATE schema_version SET version = 99", [])).unwrap();
+        drop(s);
+        let err = Store::open(&path).err().unwrap();
+        assert_eq!(err.0, "this store was written by a newer reporter (schema 99); upgrade reporter");
+        // Left as it was.
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(c.query_row("SELECT version FROM schema_version", [], |r| r.get::<_, i64>(0)).unwrap(), 99);
     }
 
     #[test]
