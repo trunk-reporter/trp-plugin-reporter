@@ -1,0 +1,35 @@
+[package]
+# The plugin's id: it names the executable, the release files and the plugin's
+# entry in the registry.
+name = "reporter"
+version = "0.1.0"
+edition = "2024"
+description = "Call, unit and talkgroup history with tr-engine's API and pages, stored in SQLite."
+license = "MIT"
+repository = "https://github.com/trunk-reporter/reporter"
+homepage = "http://127.0.0.1:8092/"
+authors = ["Andrew Miller <snarglefluffer@gmail.com>"]
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+trunk-recorder-plugin = "0.5"
+rusqlite = { version = "0.41", features = ["bundled"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tower = "0.5"
+# The settings form is drawn from the config structs' JSON Schema. Keep the
+# major version the SDK uses (1).
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rust-embed = "8"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+walkdir = "2"
+futures-util = "0.3"
+
+[profile.release]
+strip = true
+lto = true
