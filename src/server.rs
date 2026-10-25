@@ -14,7 +14,6 @@ use crate::affiliations::Affiliations;
 use crate::api::{AppState, HostStatus, router};
 use crate::bus::Bus;
 use crate::config::Config;
-use crate::store::calls::end_stale_calls;
 use crate::store::systems::meta_get;
 use crate::store::units::affiliation_events_since;
 use crate::store::{Store, now_ms};
@@ -113,8 +112,8 @@ pub fn serve_data_dir(data_dir: &Path) -> Result<ServerHandle, String> {
     };
     let store = Store::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     store.set_logger(Arc::new(|m| eprintln!("{m}")));
-    // The recorder is not attached: a call still `recording` lost its end.
-    store.write_sync(end_stale_calls).map_err(|e| e.to_string())?;
+    // Calls still `recording` are left alone: the plugin may be running on
+    // this same file (only its own start ends them).
     let meta = |key: &str| store.read(|c| meta_get(c, key)).map_err(|e| e.to_string());
     let (Some(capture_dir), Some(host_name)) = (meta("capture_dir")?, meta("host_name")?) else {
         return Err(no_store());
@@ -187,5 +186,23 @@ mod tests {
         assert!(serve_data_dir(&dir).err().unwrap().contains("run the plugin once"));
         std::fs::write(dir.join("serve.json"), "{\"port\": \"eighty\"}").unwrap();
         assert!(serve_data_dir(&dir).err().unwrap().contains("serve.json"));
+    }
+
+    #[test]
+    fn serve_mode_leaves_a_live_call_alone() {
+        let dir = trunk_recorder_plugin::testing::temp_dir("reporter-serve-live");
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .write_sync(|c| {
+                c.execute("INSERT INTO meta (key, value) VALUES ('capture_dir', '.'), ('host_name', 'test')", [])?;
+                c.execute("INSERT INTO systems (short_name, kind, first_seen_ms, last_seen_ms) VALUES ('sys1', 'p25', 0, 0)", [])?;
+                c.execute("INSERT INTO calls (system_id, call_num, tgid, start_ms, state) VALUES (1, 7, 101, 0, 'recording')", [])
+            })
+            .unwrap();
+        std::fs::write(dir.join("serve.json"), "{\"port\": 0}").unwrap();
+        let server = serve_data_dir(&dir).unwrap();
+        let state: String = store.read(|c| c.query_row("SELECT state FROM calls", [], |r| r.get(0))).unwrap();
+        assert_eq!(state, "recording");
+        server.stop();
     }
 }
