@@ -20,7 +20,7 @@ async fn pages_are_listed_from_their_meta_tags_in_order() {
     assert!(!pages.iter().any(|p| p["path"] == "/storage.html"), "{v}");
     let orders: Vec<i64> = pages.iter().map(|p| p["order"].as_i64().expect("order")).collect();
     assert!(orders.windows(2).all(|w| w[0] <= w[1]), "not sorted: {orders:?}");
-    assert_eq!(pages.len(), 22, "{v}");
+    assert_eq!(pages.len(), 23, "{v}");
     for p in pages {
         assert!(p["description"].is_string(), "{p}");
     }

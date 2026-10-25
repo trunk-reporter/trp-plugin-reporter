@@ -93,6 +93,33 @@ pub async fn one(State(state): State<AppState>, Path(id): Path<String>) -> Resul
     Ok(Json(body))
 }
 
+/// `GET /calls/{id}/transcription`: the plugin transcribes nothing, so a call
+/// that exists has none (404, as tr-engine answers for an untranscribed call).
+/// A 501 here made the IRC page fall back to one request per call.
+pub async fn transcription(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let no_transcription = blocking(&state, move |c| {
+        let row = call_row(c, &id)?;
+        Ok(ApiError::NotFound(format!("call {} has no transcription", row.id.0)))
+    })
+    .await?;
+    Err(no_transcription)
+}
+
+/// `GET /transcriptions/batch?call_ids=…`: none of them has one. The ids are
+/// checked as the spec says (1 to 500, integers) so a bad request is still a 400.
+pub async fn transcriptions_batch(QueryParams(q): QueryParams<Query>) -> Result<Json<serde_json::Value>, ApiError> {
+    let raw = q.get("call_ids").map(|s| s.trim()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::InvalidParameter("call_ids is required".into()))?;
+    let mut count = 0usize;
+    for part in raw.split(',') {
+        part.trim().parse::<u64>().map_err(|_| ApiError::InvalidParameter(format!("call_ids must be call ids, not {part}")))?;
+        count += 1;
+    }
+    if count > 500 {
+        return Err(ApiError::InvalidParameter(format!("call_ids takes at most 500 ids, not {count}")));
+    }
+    Ok(Json(serde_json::json!({ "transcriptions": [] })))
+}
+
 pub async fn call_frequencies(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<CallFrequencyListResponse>, ApiError> {
     let body = blocking(&state, move |c| {
         let row = call_row(c, &id)?;

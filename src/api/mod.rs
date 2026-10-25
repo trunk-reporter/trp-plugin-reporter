@@ -133,14 +133,12 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/unit-tag-suggestions/{id}",
     "/unit-tag-suggestions/{id}/approve",
     "/unit-tag-suggestions/{id}/dismiss",
-    "/calls/{id}/transcription",
     "/calls/{id}/transcriptions",
     "/calls/{id}/transcribe",
     "/calls/{id}/transcription/verify",
     "/calls/{id}/transcription/reject",
     "/calls/{id}/transcription/exclude",
     "/transcriptions/search",
-    "/transcriptions/batch",
     "/transcriptions/queue",
     "/call-upload",
     "/call-groups",
@@ -221,6 +219,8 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}/audio", get(calls::audio))
         .route("/calls/{id}/frequencies", get(calls::call_frequencies))
         .route("/calls/{id}/transmissions", get(calls::call_transmissions))
+        .route("/calls/{id}/transcription", get(calls::transcription).fallback(not_implemented))
+        .route("/transcriptions/batch", get(calls::transcriptions_batch))
         .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
