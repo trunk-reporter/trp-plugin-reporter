@@ -3,6 +3,7 @@
 // Later tasks use these items; until then the binary does not.
 #![allow(dead_code)]
 
+pub mod calls;
 pub mod systems;
 
 use rusqlite::ToSql;
