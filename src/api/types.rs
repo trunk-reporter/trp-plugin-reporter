@@ -11,6 +11,8 @@ use time::macros::format_description;
 
 use crate::affiliations::AffiliationEntry;
 use crate::store::calls::{CallRow, FrequencyRow, TransmissionRow, frequencies, transmissions, units_of};
+use crate::store::recorder::RecorderStateRow;
+use crate::store::stats::ActivityRow;
 use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
@@ -760,5 +762,130 @@ pub struct CallFrequencyListResponse {
 #[derive(Serialize)]
 pub struct CallTransmissionListResponse {
     pub transmissions: Vec<CallTransmission>,
+    pub total: usize,
+}
+
+/// The spec's `SystemActivity`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SystemActivity {
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub calls_1h: i64,
+    pub calls_24h: i64,
+    pub active_talkgroups: i64,
+    pub active_units: i64,
+}
+
+impl SystemActivity {
+    pub fn from_rows(row: &ActivityRow, system: &SystemRow) -> SystemActivity {
+        SystemActivity {
+            system_id: system.id.0,
+            system_name: display_name(system),
+            sysid: hex(system.sysid),
+            calls_1h: row.calls_1h,
+            calls_24h: row.calls_24h,
+            active_talkgroups: row.active_talkgroups,
+            active_units: row.active_units,
+        }
+    }
+}
+
+/// The spec's `StatsResponse`. `systems` counts sites ("total recording sites").
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StatsResponse {
+    pub systems: i64,
+    pub talkgroups: i64,
+    pub units: i64,
+    pub total_calls: i64,
+    pub calls_24h: i64,
+    pub calls_1h: i64,
+    pub total_duration_hours: f64,
+    pub system_activity: Vec<SystemActivity>,
+}
+
+/// The spec's `DecodeRate`. Both rates are trunk-recorder's messages per second.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DecodeRate {
+    pub time: String,
+    pub system_id: i64,
+    pub system_name: String,
+    pub sysid: String,
+    pub decode_rate: f64,
+    pub decode_rate_interval: f64,
+    /// Hz; 0 when the site has none.
+    pub control_channel: u64,
+}
+
+impl DecodeRate {
+    pub fn from_state(site: &SiteRow, system: &SystemRow, state: &RecorderStateRow) -> DecodeRate {
+        DecodeRate {
+            time: rfc3339(state.time_ms),
+            system_id: site.system_id.0,
+            system_name: display_name(system),
+            sysid: hex(system.sysid),
+            decode_rate: state.decode_rate,
+            decode_rate_interval: state.decode_rate,
+            control_channel: state.control_channel_hz.unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct DecodeRatesResponse {
+    pub rates: Vec<DecodeRate>,
+    pub total: usize,
+}
+
+/// The spec's `Recorder`: one per site, from its newest status sample.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Recorder {
+    pub id: String,
+    pub src_num: i64,
+    pub rec_num: i64,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub rec_state: &'static str,
+    pub freq: u64,
+    pub duration: f64,
+    pub count: u32,
+    pub squelched: bool,
+    pub tgid: Option<u32>,
+    pub tg_alpha_tag: Option<String>,
+    pub unit_id: Option<u32>,
+    pub unit_alpha_tag: Option<String>,
+}
+
+impl Recorder {
+    /// `first_ms` is the site's first sample; `duration` is the time since.
+    pub fn from_site(site: &SiteRow, system: &SystemRow, state: &RecorderStateRow, first_ms: i64, now_ms: i64) -> Recorder {
+        let rec_state = if state.recording > 0 {
+            "recording"
+        } else if state.control_channel_hz.is_some() {
+            "available"
+        } else {
+            "idle"
+        };
+        Recorder {
+            id: format!("{}_{}", system.id.0, site.id.0),
+            src_num: system.id.0,
+            rec_num: site.id.0,
+            kind: system.kind.to_uppercase(),
+            rec_state,
+            freq: state.control_channel_hz.unwrap_or(0),
+            duration: (now_ms - first_ms).max(0) as f64 / 1000.0,
+            count: state.recording,
+            squelched: false,
+            tgid: None,
+            tg_alpha_tag: None,
+            unit_id: None,
+            unit_alpha_tag: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct RecorderListResponse {
+    pub recorders: Vec<Recorder>,
     pub total: usize,
 }

@@ -16,12 +16,12 @@ use serde_json::{Value, json};
 use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, UnitEvent};
 
 use crate::affiliations::{Affiliations, Names};
-use crate::api::types::{Call as ApiCall, UnitEvent as ApiUnitEvent};
+use crate::api::types::{Call as ApiCall, DecodeRate, Recorder, UnitEvent as ApiUnitEvent};
 use crate::bus::{Bus, EventKind, NewEvent};
 use crate::config::Config;
 use crate::store::calls::{NewCall, call_by_id, call_concluded, call_ended, call_started};
-use crate::store::recorder::insert_recorder_state;
-use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity};
+use crate::store::recorder::{RecorderStateRow, first_state_ms, insert_recorder_state};
+use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity, site_by_id, system_by_id};
 use crate::store::talkgroups::{TgTags, tag_talkgroup, touch_talkgroup};
 use crate::store::units::{NewUnitEvent, event_type_of, insert_unit_event, touch_unit, transmission_events, unit_event_by_id};
 use crate::store::{CallId, SiteId, Store, StoreError, SystemId, now_ms};
@@ -101,13 +101,15 @@ fn unit_event(conn: &Connection, id: i64, e: &NewUnitEvent, instance: &str) -> r
     })
 }
 
-/// The bus payloads for `recorder_update` and `rate_update`. Task 15 fills them.
-fn recorder_json(_conn: &Connection, _site: SiteId) -> Value {
-    json!({})
-}
-
-fn rate_json(_conn: &Connection, _site: SiteId) -> Value {
-    json!({})
+/// The bus payloads for `recorder_update` and `rate_update`: the site's newest sample.
+fn status_payloads(conn: &Connection, site_id: SiteId, state: &RecorderStateRow) -> rusqlite::Result<(String, String)> {
+    let empty = || ("{}".to_string(), "{}".to_string());
+    let Some(site) = site_by_id(conn, site_id)? else { return Ok(empty()) };
+    let Some(system) = system_by_id(conn, site.system_id)? else { return Ok(empty()) };
+    let first = first_state_ms(conn, site_id)?.unwrap_or(state.time_ms);
+    let recorder = Recorder::from_site(&site, &system, state, first, state.time_ms);
+    let rate = DecodeRate::from_state(&site, &system, state);
+    Ok((json!(recorder).to_string(), json!(rate).to_string()))
 }
 
 /// The names the affiliation map shows beside an entry.
@@ -516,7 +518,16 @@ impl Ingest {
                     Identity { nac: s.nac, wacn: s.wacn, sys_id: s.sys_id, rfss: s.rfss, site_number: s.site, control_channel_hz: s.control_channel_hz };
                 set_identity(c, site_id, &identity, time_ms)?;
                 insert_recorder_state(c, site_id, time_ms, s.control_channel_hz, s.decode_rate, s.active_calls, s.recording)?;
-                for (kind, data) in [(EventKind::RecorderUpdate, recorder_json(c, site_id)), (EventKind::RateUpdate, rate_json(c, site_id))] {
+                let state = RecorderStateRow {
+                    site_id,
+                    time_ms,
+                    control_channel_hz: s.control_channel_hz,
+                    decode_rate: s.decode_rate,
+                    active_calls: s.active_calls,
+                    recording: s.recording,
+                };
+                let (recorder, rate) = status_payloads(c, site_id, &state)?;
+                for (kind, data) in [(EventKind::RecorderUpdate, recorder), (EventKind::RateUpdate, rate)] {
                     after.events.push(NewEvent {
                         kind,
                         sub_type: None,
@@ -525,7 +536,7 @@ impl Ingest {
                         tgid: None,
                         unit_id: None,
                         emergency: false,
-                        data: data.to_string(),
+                        data,
                     });
                 }
                 Ok(())
@@ -819,5 +830,12 @@ mod tests {
         assert_eq!(r.count("SELECT control_channel_hz FROM sites WHERE name = 'sys1'"), 851_000_000);
         assert_eq!(kinds(&events), vec![("recorder_update", None), ("rate_update", None)]);
         assert!(events.iter().all(|e| e.kind != EventKind::CallStart));
+
+        let rec: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!((rec["src_num"].as_i64(), rec["rec_num"].as_i64(), rec["rec_state"].as_str()), (Some(1), Some(1), Some("recording")));
+        assert_eq!((rec["id"].as_str(), rec["type"].as_str(), rec["freq"].as_u64()), (Some("1_1"), Some("P25"), Some(851_000_000)));
+        let rate: Value = serde_json::from_str(&events[1].data).unwrap();
+        assert_eq!((rate["decode_rate"].as_f64(), rate["system_id"].as_i64(), rate["sysid"].as_str()), (Some(40.0), Some(1), Some("3AB")));
+        assert_eq!(rate["time"].as_str().map(|t| OffsetDateTime::parse(t, &Rfc3339).unwrap().unix_timestamp()), Some(T0));
     }
 }

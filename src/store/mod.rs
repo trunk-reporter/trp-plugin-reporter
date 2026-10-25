@@ -3,6 +3,7 @@
 
 pub mod calls;
 pub mod recorder;
+pub mod stats;
 pub mod systems;
 pub mod talkgroups;
 pub mod units;

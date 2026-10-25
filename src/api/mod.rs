@@ -3,6 +3,7 @@
 
 pub mod calls;
 pub mod health;
+pub mod stats;
 pub mod systems;
 pub mod talkgroups;
 pub mod types;
@@ -133,8 +134,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/call-upload",
     "/call-groups",
     "/call-groups/{id}",
-    "/stats",
-    "/stats/rates",
     "/stats/talkgroup-activity",
     "/stats/call-volume",
     "/stats/daily-overview",
@@ -142,7 +141,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/stats/call-heatmap",
     "/analytics/recorder-utilization",
     "/analytics/decode-rates",
-    "/recorders",
     "/trunking-messages",
     "/console-messages",
     "/events/stream",
@@ -184,6 +182,9 @@ pub fn router(state: AppState) -> Router {
         .route("/units/{id}/calls", get(calls::unit_calls))
         .route("/unit-events", get(units::unit_events))
         .route("/unit-affiliations", get(units::affiliations))
+        .route("/stats", get(stats::stats))
+        .route("/stats/rates", get(stats::rates))
+        .route("/recorders", get(stats::recorders))
         .route("/calls", get(calls::list))
         .route("/calls/active", get(calls::active))
         .route("/calls/{id}", get(calls::one))
