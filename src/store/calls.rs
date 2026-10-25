@@ -331,7 +331,7 @@ impl Default for CallFilter {
     }
 }
 
-fn push_in(conds: &mut Vec<String>, params: &mut Vec<Value>, prefix: &str, suffix: &str, values: &[i64]) {
+pub(super) fn push_in(conds: &mut Vec<String>, params: &mut Vec<Value>, prefix: &str, suffix: &str, values: &[i64]) {
     if values.is_empty() {
         return;
     }

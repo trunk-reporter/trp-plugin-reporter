@@ -5,6 +5,8 @@
 
 pub mod calls;
 pub mod systems;
+pub mod talkgroups;
+pub mod units;
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef};
