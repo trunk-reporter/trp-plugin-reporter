@@ -179,7 +179,8 @@
       var root = d3.hierarchy(hierarchy).sum(function(d) { return d.value; }).sort(function(a, b) { return b.value - a.value; });
       d3.treemap().size([width, height]).padding(3).round(true)(root);
 
-      d3.select('#treemap').select('svg').remove();
+      // The "Loading…" span would otherwise sit over the chart for good.
+      container.innerHTML = '';
       var svg = d3.select('#treemap').append('svg').attr('width', width).attr('height', height);
 
       var color = function(system_id) {
@@ -208,29 +209,42 @@
         .text(function(d) { return d.data.name; })
         .append('title').text(function(d) { return d.data.name + ' — ' + d.value + ' calls'; });
 
-      // Talkgroup rectangles
-      var tg = svg.selectAll('.tg').data(root.descendants().filter(function(d) { return d.depth === 2; })).enter().append('rect')
+      // Talkgroup rectangles: the system's colour, lightened by rank so each
+      // cell stands out from its neighbours and from the system box behind it
+      // (the same colour at 45% opacity over itself was invisible).
+      var tgNodes = root.descendants().filter(function(d) { return d.depth === 2; });
+      var tgFill = function(d) {
+        var base = d3.color(systemColors[Number(d.data.system_id || 0) % systemColors.length]) || d3.color('#888');
+        var siblings = d.parent.children.length;
+        var rank = d.parent.children.indexOf(d);
+        return base.brighter(0.4 + 1.6 * (siblings > 1 ? rank / (siblings - 1) : 0)).formatHex();
+      };
+      var tg = svg.selectAll('.tg').data(tgNodes).enter().append('rect')
         .attr('class', 'tg')
-        .attr('fill', function(d) { return systemColors[Number(d.data.system_id || 0) % systemColors.length]; })
-        .attr('opacity', 0.45).attr('rx', 3)
+        .attr('fill', tgFill)
+        .attr('stroke', 'rgba(0,0,0,0.25)').attr('stroke-width', 1)
+        .attr('opacity', 0.9).attr('rx', 3)
         .attr('width', function(d) { return d.x1 - d.x0; })
         .attr('height', function(d) { return d.y1 - d.y0; })
         .attr('x', function(d) { return d.x0; }).attr('y', function(d) { return d.y0; })
         .attr('data-sid', function(d) { return d.data.system_id; })
         .on('click', function(event, d) { showDetail(d); })
         .on('mouseover', function(event, d) {
-          d3.select(this).attr('opacity', 0.8);
+          d3.select(this).attr('opacity', 1).attr('stroke', '#fff');
         })
         .on('mouseout', function(event, d) {
-          d3.select(this).attr('opacity', 0.45);
+          d3.select(this).attr('opacity', 0.9).attr('stroke', 'rgba(0,0,0,0.25)');
         });
 
-      // TG labels
-      tg.filter(function(d) { return (d.x1 - d.x0) > 40 && (d.y1 - d.y0) > 20; }).append('text')
+      // TG labels: siblings of the rects (a <text> inside a <rect> never draws).
+      var labelFits = function(d) { return (d.x1 - d.x0) > 40 && (d.y1 - d.y0) > 20; };
+      var tgLabel = svg.selectAll('.tg-label').data(tgNodes).enter().append('text')
+        .attr('class', 'tg-label')
         .attr('x', function(d) { return d.x0 + 4; }).attr('y', function(d) { return d.y0 + 12; })
-        .attr('fill', '#fff').attr('font-size', '9px')
+        .attr('fill', '#1a1a1a').attr('font-size', '9px')
         .attr('font-family', 'IBM Plex Mono, monospace')
-        .attr('opacity', function(d) { return ((d.x1 - d.x0) > 40 && (d.y1 - d.y0) > 20) ? 0.7 : 0; })
+        .attr('pointer-events', 'none')
+        .attr('opacity', function(d) { return labelFits(d) ? 0.85 : 0; })
         .text(function(d) { return d.data.tgid + ': ' + d.value; });
 
       // Resize handler
@@ -242,7 +256,8 @@
         tg.attr('width', function(d) { return d.x1 - d.x0; }).attr('height', function(d) { return d.y1 - d.y0; }).attr('x', function(d) { return d.x0; }).attr('y', function(d) { return d.y0; });
         system.filter(function(d) { return d.height === 1; }).select('rect').attr('width', function(d) { return d.x1 - d.x0; }).attr('height', function(d) { return d.y1 - d.y0; }).attr('x', function(d) { return d.x0; }).attr('y', function(d) { return d.y0; });
         system.select('text').attr('x', function(d) { return d.x0 + 8; }).attr('y', function(d) { return d.y0 + 18; });
-        tg.filter(function(d) { return (d.x1 - d.x0) > 40 && (d.y1 - d.y0) > 20; }).attr('x', function(d) { return d.x0; }).attr('y', function(d) { return d.y0; }).append('text').attr('x', function(d) { return d.x0 + 4; }).attr('y', function(d) { return d.y0 + 12; });
+        tgLabel.attr('x', function(d) { return d.x0 + 4; }).attr('y', function(d) { return d.y0 + 12; })
+          .attr('opacity', function(d) { return labelFits(d) ? 0.85 : 0; });
       });
       ro.observe(container);
     }

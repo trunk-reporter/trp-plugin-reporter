@@ -21,7 +21,7 @@ use axum::http::Method;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -156,7 +156,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/console-messages",
     "/audio/live",
     "/audio/jitter",
-    "/query",
     "/admin/systems/merge",
     "/admin/maintenance",
     "/admin/transcribe-backfill",
@@ -221,7 +220,8 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}", get(calls::one))
         .route("/calls/{id}/audio", get(calls::audio))
         .route("/calls/{id}/frequencies", get(calls::call_frequencies))
-        .route("/calls/{id}/transmissions", get(calls::call_transmissions));
+        .route("/calls/{id}/transmissions", get(calls::call_transmissions))
+        .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }
@@ -232,6 +232,14 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .layer(middleware::from_fn_with_state(state.clone(), log_internal))
         .with_state(state)
+}
+
+/// `POST /query` is ad-hoc SQL, which tr-engine lets an operator turn off with a
+/// 403. Its pages take that 403 as "disabled" and carry on without history
+/// (the stream graph streams live events instead), so that is what the plugin
+/// answers, not the 501 that stops them.
+async fn query_forbidden() -> ApiError {
+    ApiError::Forbidden("ad-hoc SQL queries are not available in the Trunk Recorder Pro plugin".into())
 }
 
 async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {

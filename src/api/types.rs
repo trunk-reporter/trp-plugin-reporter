@@ -61,6 +61,8 @@ pub enum ApiError {
         matches: Vec<(i64, String, String)>,
     },
     Unauthorized,
+    /// Refused on purpose, as tr-engine refuses it when an operator turns it off.
+    Forbidden(String),
     /// The request path: tr-engine serves it, this plugin does not.
     NotImplemented(String),
     Internal(String),
@@ -98,6 +100,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
             ApiError::Unauthorized => ApiError::error(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid token", ""),
+            ApiError::Forbidden(m) => ApiError::error(StatusCode::FORBIDDEN, "forbidden", m, ""),
             ApiError::NotImplemented(path) => {
                 ApiError::error(StatusCode::NOT_IMPLEMENTED, "not_implemented", "not available in the Trunk Recorder Pro plugin", path)
             }

@@ -67,6 +67,16 @@ async fn pages_and_the_spec_are_served() {
     assert_eq!(&body[..], include_str!("../openapi/openapi.yaml").as_bytes());
 }
 
+/// tr-engine's pages read a 403 from `/query` as "turned off" and go on
+/// without it (the stream graph then shows live traffic only); a 501 stops them.
+#[tokio::test]
+async fn ad_hoc_sql_is_forbidden_not_unimplemented() {
+    let (s, v) = request(&app().0, Method::POST, "/api/v1/query").await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(v["code"], "forbidden");
+    assert_schema(&v, "Error");
+}
+
 #[tokio::test]
 async fn out_of_scope_paths_say_so_with_501() {
     let (s, v) = get(&app().0, "/api/v1/transcriptions/search").await;

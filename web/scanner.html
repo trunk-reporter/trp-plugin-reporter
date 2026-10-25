@@ -2010,6 +2010,10 @@ async function fillFeedViewport() {
     }
     // Stop once the scrollable area exceeds the viewport
     if (feedEl.scrollHeight > feedEl.clientHeight + 50) break;
+    // With no channel selected nothing is ever visible, so the viewport can
+    // never fill: one page is enough until a channel is picked (selecting
+    // one restarts the fill).
+    if (selectedChannels.size === 0) break;
   }
 }
 
