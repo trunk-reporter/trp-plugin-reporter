@@ -3,6 +3,7 @@
 
 pub mod affiliations;
 pub mod api;
+pub mod backfill;
 pub mod bus;
 pub mod config;
 pub mod ingest;

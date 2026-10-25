@@ -462,6 +462,11 @@ pub fn newest_start_ms(conn: &Connection, system: SystemId) -> rusqlite::Result<
     conn.query_row("SELECT MAX(start_ms) FROM calls WHERE system_id = ?1", [system], |r| r.get(0))
 }
 
+/// Whether a call with this `path` is stored.
+pub fn path_exists(conn: &Connection, path: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM calls WHERE path = ?1)", [path], |r| r.get(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

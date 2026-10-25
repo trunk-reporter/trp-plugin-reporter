@@ -167,7 +167,7 @@ fn insert_transmission_events(conn: &Connection, after: &mut After, live: bool, 
 }
 
 /// A file path as stored: relative to the capture folder when it is under it.
-fn stored_path(capture_dir: Option<&Path>, p: &Path) -> String {
+pub(crate) fn stored_path(capture_dir: Option<&Path>, p: &Path) -> String {
     match capture_dir.and_then(|d| p.strip_prefix(d).ok()) {
         Some(rel) => rel.to_string_lossy().replace('\\', "/"),
         None => p.to_string_lossy().into_owned(),
@@ -252,6 +252,14 @@ impl Ingest {
     pub fn with_host_name(mut self, name: &str) -> Ingest {
         self.host_name = name.to_string();
         self
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub(crate) fn host(&self) -> Option<&Host> {
+        self.host.as_ref()
     }
 
     /// Unit events of a kind tr-engine has no type for.
