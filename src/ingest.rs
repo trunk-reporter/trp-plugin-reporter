@@ -2,9 +2,10 @@
 //!
 //! [`Ingest::handle`] runs on the plugin's message thread and never waits on
 //! the database except the first time it sees a system or site (to learn its
-//! row id). Everything else is a queued [`Store::write`] closure that owns
-//! its data and publishes its bus events once its rows are written, so bus
-//! events come out in the order the recorder sent the messages.
+//! row id). Everything else is a queued write that owns its data; its side
+//! effects (bus events, the affiliation map, a new call's row id) happen in
+//! the write's after-commit hook, only if it committed, so bus events come
+//! out in the order the recorder sent the messages and never for rolled-back rows.
 // Backfill (Task 18) and the server (Task 19) use the rest.
 #![allow(dead_code)]
 
@@ -19,7 +20,7 @@ use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessa
 use crate::affiliations::{Affiliations, Names};
 use crate::bus::{Bus, EventKind, NewEvent};
 use crate::config::Config;
-use crate::store::calls::{NewCall, call_by_id, call_concluded, call_ended, call_started};
+use crate::store::calls::{CallRow, NewCall, call_by_id, call_concluded, call_ended, call_started};
 use crate::store::recorder::insert_recorder_state;
 use crate::store::systems::{Identity, ensure_site, ensure_system, set_identity};
 use crate::store::talkgroups::{TgTags, tag_talkgroup, touch_talkgroup};
@@ -28,8 +29,8 @@ use crate::store::{CallId, SiteId, Store, StoreError, SystemId, now_ms};
 
 /// A call between its `call.start` and its `call.concluded` (or its unrecorded `call.end`).
 struct Live {
-    /// Set by the `call.start` write once its row exists; later writes for the
-    /// call run after it on the writer, so they find it set (unless it failed).
+    /// Set once the `call.start` write has committed; later writes for the call
+    /// run after it on the writer, so they find it set (unless it failed).
     id: Arc<OnceLock<CallId>>,
     system_id: SystemId,
     site_id: SiteId,
@@ -66,28 +67,22 @@ fn record_start_ms(r: &CallRecord) -> i64 {
 }
 
 /// The bus payload for `call_*` events. Task 14 replaces it with the API's `Call`.
-fn call_json(conn: &Connection, id: CallId) -> rusqlite::Result<Option<(Value, NewEvent)>> {
-    Ok(call_by_id(conn, id)?.map(|row| {
-        let data = json!({"call_id": row.id.0, "system_id": row.system_id.0, "tgid": row.tgid, "start_ms": row.start_ms, "call_state": row.state});
-        let event = NewEvent {
-            kind: EventKind::CallStart,
-            sub_type: None,
-            system_id: Some(row.system_id.0),
-            site_id: row.site_id.map(|s| s.0),
-            tgid: Some(row.tgid),
-            unit_id: None,
-            emergency: row.emergency,
-            data: String::new(),
-        };
-        (data, event)
-    }))
+fn call_json(row: &CallRow) -> Value {
+    json!({"call_id": row.id.0, "system_id": row.system_id.0, "tgid": row.tgid, "start_ms": row.start_ms, "call_state": row.state})
 }
 
-fn publish_call(bus: &Bus, conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Result<()> {
-    if let Some((data, event)) = call_json(conn, id)? {
-        bus.publish(NewEvent { kind, data: data.to_string(), ..event });
-    }
-    Ok(())
+/// A `call_*` bus event for the call's row as it is now.
+fn call_event(conn: &Connection, id: CallId, kind: EventKind) -> rusqlite::Result<Option<NewEvent>> {
+    Ok(call_by_id(conn, id)?.map(|row| NewEvent {
+        kind,
+        sub_type: None,
+        system_id: Some(row.system_id.0),
+        site_id: row.site_id.map(|s| s.0),
+        tgid: Some(row.tgid),
+        unit_id: None,
+        emergency: row.emergency,
+        data: call_json(&row).to_string(),
+    }))
 }
 
 /// The bus payload for `unit_event`. Task 13 replaces it with the API's `UnitEvent`.
@@ -95,8 +90,8 @@ fn unit_event_json(_conn: &Connection, _id: i64, e: &NewUnitEvent) -> Value {
     json!({"event_type": e.event_type, "unit_id": e.unit, "tgid": e.tgid, "system_id": e.system_id.0, "time_ms": e.time_ms})
 }
 
-fn publish_unit_event(bus: &Bus, conn: &Connection, id: i64, e: &NewUnitEvent) {
-    bus.publish(NewEvent {
+fn unit_event(conn: &Connection, id: i64, e: &NewUnitEvent) -> NewEvent {
+    NewEvent {
         kind: EventKind::UnitEvent,
         sub_type: Some(e.event_type.to_string()),
         system_id: Some(e.system_id.0),
@@ -105,7 +100,7 @@ fn publish_unit_event(bus: &Bus, conn: &Connection, id: i64, e: &NewUnitEvent) {
         unit_id: Some(e.unit),
         emergency: e.emergency,
         data: unit_event_json(conn, id, e).to_string(),
-    });
+    }
 }
 
 /// The bus payloads for `recorder_update` and `rate_update`. Task 15 fills them.
@@ -135,26 +130,68 @@ fn names(conn: &Connection, system_id: SystemId, unit: u32, tgid: Option<u32>) -
     Ok(Names { system_name, sysid: sysid.map(|s| format!("{s:X}")).unwrap_or_default(), unit_alpha_tag, tg_alpha_tag, tg_description, tg_tag, tg_group })
 }
 
-/// Insert synthesized `call`/`end` events; feed the affiliation map with those
-/// that are new; publish a `unit_event` for each `call` event of a unit in `tell`.
-fn insert_transmission_events(
-    conn: &Connection,
-    bus: Option<&Bus>,
-    affiliations: &Affiliations,
-    events: &[NewUnitEvent],
-    tell: &mut HashSet<u32>,
-) -> rusqlite::Result<()> {
+/// What a write's after-commit hook does, and only once the write committed:
+/// record a new call's row id, update the affiliation map, publish on the bus.
+#[derive(Default)]
+struct After {
+    call: Option<(Arc<OnceLock<CallId>>, CallId)>,
+    affiliations: Vec<(NewUnitEvent, Names)>,
+    events: Vec<NewEvent>,
+}
+
+impl After {
+    /// Feed the affiliation map with `e` (display names are best-effort).
+    fn affiliate(&mut self, conn: &Connection, e: &NewUnitEvent) {
+        self.affiliations.push((e.clone(), names(conn, e.system_id, e.unit, e.tgid).unwrap_or_default()));
+    }
+}
+
+/// Insert synthesized `call`/`end` events. When `live`, those that are new feed
+/// the affiliation map and each `call` event of a unit in `tell` is published.
+/// (Backfilled history leaves the live map alone: the start-up rebuild covers it.)
+fn insert_transmission_events(conn: &Connection, after: &mut After, live: bool, events: &[NewUnitEvent], tell: &mut HashSet<u32>) -> rusqlite::Result<()> {
     for e in events {
         let Some(id) = insert_unit_event(conn, e)? else { continue };
-        affiliations.apply(e.system_id.0, e.unit, e.event_type, e.tgid, e.time_ms, names(conn, e.system_id, e.unit, e.tgid)?);
-        if let Some(bus) = bus
-            && e.event_type == "call"
-            && tell.remove(&e.unit)
-        {
-            publish_unit_event(bus, conn, id, e);
+        if !live {
+            continue;
+        }
+        after.affiliate(conn, e);
+        if e.event_type == "call" && tell.remove(&e.unit) {
+            after.events.push(unit_event(conn, id, e));
         }
     }
     Ok(())
+}
+
+/// A file path as stored: relative to the capture folder when it is under it.
+fn stored_path(capture_dir: Option<&Path>, p: &Path) -> String {
+    match capture_dir.and_then(|d| p.strip_prefix(d).ok()) {
+        Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+        None => p.to_string_lossy().into_owned(),
+    }
+}
+
+/// A concluded call's audio: the recorder's files (chosen on the writer, which
+/// may look at the disk), or a path already worked out (backfill).
+enum Audio {
+    Files { wav: PathBuf, m4a: Option<PathBuf>, capture_dir: Option<PathBuf> },
+    Given(Option<String>),
+}
+
+impl Audio {
+    /// The WAV, or the M4A when there is no WAV file.
+    fn stored(self) -> Option<String> {
+        match self {
+            Audio::Given(p) => p,
+            Audio::Files { wav, m4a, capture_dir } => {
+                let file = match m4a {
+                    Some(m4a) if !wav.is_file() => m4a,
+                    _ => wav,
+                };
+                (!file.as_os_str().is_empty()).then(|| stored_path(capture_dir.as_deref(), &file))
+            }
+        }
+    }
 }
 
 /// What a `call.concluded` (or a backfilled record) writes.
@@ -163,7 +200,7 @@ struct Conclusion {
     site_id: Option<SiteId>,
     path: String,
     record: CallRecord,
-    audio_path: Option<String>,
+    audio: Audio,
     json_path: String,
     /// The live call's id, when its start was seen.
     existing: Option<Arc<OnceLock<CallId>>>,
@@ -262,12 +299,28 @@ impl Ingest {
         }
     }
 
-    /// A file path as stored: relative to the capture folder when it is under it.
-    fn stored_path(&self, p: &Path) -> String {
-        match self.capture_dir.as_deref().and_then(|d| p.strip_prefix(d).ok()) {
-            Some(rel) => rel.to_string_lossy().replace('\\', "/"),
-            None => p.to_string_lossy().into_owned(),
-        }
+    /// Queue a write whose side effects (`After`) happen only once it has committed.
+    fn commit(&self, f: impl FnOnce(&Connection, &mut After) -> rusqlite::Result<()> + Send + 'static) {
+        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
+        self.store.write_then(
+            move |c| {
+                let mut after = After::default();
+                f(c, &mut after)?;
+                Ok(after)
+            },
+            move |done| {
+                let Some(after) = done else { return };
+                if let Some((cell, id)) = after.call {
+                    let _ = cell.set(id);
+                }
+                for (e, names) in after.affiliations {
+                    affiliations.apply(e.system_id.0, e.unit, e.event_type, e.tgid, e.time_ms, names);
+                }
+                for event in after.events {
+                    bus.publish(event);
+                }
+            },
+        );
     }
 
     pub fn handle(&mut self, msg: HostMessage) {
@@ -289,19 +342,19 @@ impl Ingest {
         let cell = Arc::new(OnceLock::new());
         let mut tell: HashSet<u32> = info.sources.iter().map(|s| s.unit).collect();
         self.live.insert((info.system, info.id), Live { id: cell.clone(), system_id, site_id, units_told: tell.clone() });
-        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
-        self.store.write(move |c| {
+        self.commit(move |c, after| {
             let new = NewCall::from_info(&info, system_id, Some(site_id));
             let id = call_started(c, &new)?;
-            let _ = cell.set(id);
+            // Known to later writes only once this one commits: SQLite reuses a rolled-back id.
+            after.call = Some((cell, id));
             touch_talkgroup(c, system_id, info.talkgroup, &TgTags::from_info(&info), new.start_ms, info.encrypted, info.algid)?;
             let sources = sources_of(&info);
             for &(unit, time_ms, _) in &sources {
                 touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
             }
-            publish_call(&bus, c, id, EventKind::CallStart)?;
+            after.events.extend(call_event(c, id, EventKind::CallStart)?);
             let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, None);
-            insert_transmission_events(c, Some(&bus), &affiliations, &events, &mut tell)
+            insert_transmission_events(c, after, true, &events, &mut tell)
         });
     }
 
@@ -321,17 +374,16 @@ impl Ingest {
         if ended.is_some() {
             self.live.remove(&key);
         }
-        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
-        self.store.write(move |c| {
+        self.commit(move |c, after| {
             let Some(&id) = cell.get() else { return Ok(()) };
             call_ended(c, id, end_ms, &info)?;
             let sources = sources_of(&info);
             for &(unit, time_ms, _) in sources.iter().filter(|s| tell.contains(&s.0)) {
                 touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
             }
-            publish_call(&bus, c, id, EventKind::CallUpdate)?;
+            after.events.extend(call_event(c, id, EventKind::CallUpdate)?);
             let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, ended);
-            insert_transmission_events(c, Some(&bus), &affiliations, &events, &mut tell)
+            insert_transmission_events(c, after, true, &events, &mut tell)
         });
     }
 
@@ -350,10 +402,6 @@ impl Ingest {
                 self.site(system_id, &name)
             }
         };
-        let audio = match &call.files.m4a {
-            Some(m4a) if !call.files.wav.is_file() => m4a.clone(),
-            _ => call.files.wav.clone(),
-        };
         let tell = match &live {
             Some(l) => call.call.src_list.iter().map(|s| s.src as u32).filter(|u| !l.units_told.contains(u)).collect(),
             None => call.call.src_list.iter().map(|s| s.src as u32).collect(),
@@ -361,8 +409,8 @@ impl Ingest {
         let conclusion = Conclusion {
             system_id,
             site_id,
-            audio_path: (!audio.as_os_str().is_empty()).then(|| self.stored_path(&audio)),
-            json_path: self.stored_path(&call.files.json),
+            audio: Audio::Files { wav: call.files.wav, m4a: call.files.m4a, capture_dir: self.capture_dir.clone() },
+            json_path: stored_path(self.capture_dir.as_deref(), &call.files.json),
             path: call.path.clone(),
             record: call.call,
             existing: live.map(|l| l.id),
@@ -375,7 +423,8 @@ impl Ingest {
         }
     }
 
-    /// Store a call record found on disk: as `call.concluded`, with no bus events and no result.
+    /// Store a call record found on disk: as `call.concluded`, with no bus
+    /// events, no result, and no change to the live affiliation map.
     pub fn backfill_record(&mut self, path: &str, record: &CallRecord, audio_path: Option<&str>, json_path: &str) {
         let Some(system_id) = self.system(None, &record.short_name) else { return };
         let site_id = self.site(system_id, site_name(&record.site, &record.short_name));
@@ -384,7 +433,7 @@ impl Ingest {
             site_id,
             path: path.to_string(),
             record: record.clone(),
-            audio_path: audio_path.map(String::from),
+            audio: Audio::Given(audio_path.map(String::from)),
             json_path: json_path.to_string(),
             existing: None,
             tell: None,
@@ -392,12 +441,12 @@ impl Ingest {
     }
 
     fn conclude(&mut self, k: Conclusion) {
-        let bus = k.tell.is_some().then(|| self.bus.clone());
-        let affiliations = self.affiliations.clone();
-        self.store.write(move |c| {
+        self.commit(move |c, after| {
+            let live = k.tell.is_some();
             let r = &k.record;
             let existing = k.existing.as_ref().and_then(|cell| cell.get().copied());
-            let id = call_concluded(c, k.system_id, k.site_id, &k.path, r, k.audio_path.as_deref(), &k.json_path, existing)?;
+            let audio_path = k.audio.stored();
+            let id = call_concluded(c, k.system_id, k.site_id, &k.path, r, audio_path.as_deref(), &k.json_path, existing)?;
             let tags = TgTags::from_record(r);
             if existing.is_some() {
                 // `call.start` counted it already.
@@ -412,9 +461,9 @@ impl Ingest {
             let sources: Vec<(u32, i64, bool)> = r.src_list.iter().map(|s| (s.src as u32, s.time * 1000, s.emergency)).collect();
             let events = transmission_events(id, k.system_id, k.site_id, r.talkgroup, &sources, Some(record_end_ms(r)));
             let mut tell = k.tell.unwrap_or_default();
-            insert_transmission_events(c, bus.as_ref(), &affiliations, &events, &mut tell)?;
-            if let Some(bus) = &bus {
-                publish_call(bus, c, id, EventKind::CallEnd)?;
+            insert_transmission_events(c, after, live, &events, &mut tell)?;
+            if live {
+                after.events.extend(call_event(c, id, EventKind::CallEnd)?);
             }
             Ok(())
         });
@@ -438,12 +487,11 @@ impl Ingest {
             call_id: None,
             metadata_json: metadata,
         };
-        let (bus, affiliations) = (self.bus.clone(), self.affiliations.clone());
-        self.store.write(move |c| {
+        self.commit(move |c, after| {
             touch_unit(c, e.system_id, e.unit, "", "", e.time_ms, Some((e.event_type, e.tgid)))?;
             if let Some(id) = insert_unit_event(c, &e)? {
-                affiliations.apply(e.system_id.0, e.unit, e.event_type, e.tgid, e.time_ms, names(c, e.system_id, e.unit, e.tgid)?);
-                publish_unit_event(&bus, c, id, &e);
+                after.affiliate(c, &e);
+                after.events.push(unit_event(c, id, &e));
             }
             Ok(())
         });
@@ -454,14 +502,13 @@ impl Ingest {
         for s in status.systems {
             let Some(system_id) = self.system(Some(s.index), &s.short_name) else { continue };
             let Some(site_id) = self.site(system_id, site_name(&s.site_name, &s.short_name)) else { continue };
-            let bus = self.bus.clone();
-            self.store.write(move |c| {
+            self.commit(move |c, after| {
                 let identity =
                     Identity { nac: s.nac, wacn: s.wacn, sys_id: s.sys_id, rfss: s.rfss, site_number: s.site, control_channel_hz: s.control_channel_hz };
                 set_identity(c, site_id, &identity, time_ms)?;
                 insert_recorder_state(c, site_id, time_ms, s.control_channel_hz, s.decode_rate, s.active_calls, s.recording)?;
                 for (kind, data) in [(EventKind::RecorderUpdate, recorder_json(c, site_id)), (EventKind::RateUpdate, rate_json(c, site_id))] {
-                    bus.publish(NewEvent {
+                    after.events.push(NewEvent {
                         kind,
                         sub_type: None,
                         system_id: Some(system_id.0),
@@ -635,14 +682,67 @@ mod tests {
     #[test]
     fn a_backfilled_record_is_stored_without_bus_events_or_results() {
         let mut r = rig();
+        // Unit 1234 is on 202 now; the backfilled call has it on 101 earlier.
+        r.ingest.handle(HostMessage::Unit(UnitEvent {
+            system: 0,
+            short_name: "sys1".into(),
+            kind: "affiliation".into(),
+            unit: 1234,
+            talkgroup: Some(202),
+            time: (T0 + 3600) as f64,
+            ..Default::default()
+        }));
+        r.events();
+        let snapshot = |r: &Rig| r.affiliations.snapshot(&AffiliationFilter { limit: 100, ..Default::default() }, (T0 + 3600) * 1000);
+        let before = snapshot(&r);
+        assert_eq!(before.0.iter().map(|e| (e.unit_id, e.tgid)).collect::<Vec<_>>(), vec![(1234, 202)]);
+
         let cc = testing::call(&r.dir, "sys1", 101);
         r.ingest.backfill_record(&cc.path, &cc.call, Some("a.wav"), "a.json");
         let events = r.events();
         let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
         assert_eq!((row.audio_path.as_deref(), row.json_path.as_deref()), (Some("a.wav"), Some("a.json")));
-        assert_eq!(r.unit_events().len(), 2);
+        assert_eq!(r.count("SELECT count(*) FROM unit_events WHERE call_id IS NOT NULL"), 2);
         assert!(events.is_empty());
         assert!(r.captured.output().results().is_empty());
+        assert_eq!(snapshot(&r), before);
+    }
+
+    #[test]
+    fn a_failed_call_start_leaves_no_id_and_publishes_nothing() {
+        let mut r = rig();
+        let fail = "CREATE TRIGGER fail BEFORE INSERT ON talkgroups BEGIN SELECT RAISE(ABORT, 'boom'); END";
+        r.store.write_sync(move |c| c.execute_batch(fail)).unwrap();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[(10, T0)], true)));
+        let events = r.events();
+        assert!(events.is_empty());
+        assert_eq!(r.count("SELECT count(*) FROM calls"), 0);
+        assert!(r.ingest.live[&(0, 7)].id.get().is_none());
+        assert!(r.affiliations.snapshot(&AffiliationFilter { limit: 100, ..Default::default() }, T0 * 1000).0.is_empty());
+
+        // SQLite hands the rolled-back id to the next call; call 7's later messages must not touch it.
+        r.store.write_sync(|c| c.execute_batch("DROP TRIGGER fail")).unwrap();
+        r.ingest.handle(HostMessage::CallStart(info(8, &[(30, T0)], true)));
+        r.ingest.handle(HostMessage::CallEnd(info(7, &[(10, T0), (20, T0 + 2)], true)));
+        let mut cc = testing::call(&r.dir, "sys1", 101);
+        cc.call.call_num = 7;
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        r.events();
+        let other = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!((other.call_num, other.state.as_str(), other.path.as_deref()), (Some(8), "recording", None));
+        assert_eq!(r.count("SELECT count(*) FROM call_transmissions WHERE call_id = 1"), 0);
+    }
+
+    #[test]
+    fn a_concluded_call_without_a_wav_file_stores_its_m4a() {
+        let mut r = rig();
+        let cc = testing::call(&r.dir, "sys1", 101);
+        std::fs::remove_file(&cc.files.wav).unwrap();
+        let path = cc.path.clone();
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        r.events();
+        let row = r.store.read(|c| call_by_id(c, CallId(1))).unwrap().unwrap();
+        assert_eq!(row.audio_path.as_deref(), Some(format!("{path}.m4a").as_str()));
     }
 
     #[test]

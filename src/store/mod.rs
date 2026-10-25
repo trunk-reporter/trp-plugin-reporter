@@ -227,6 +227,25 @@ impl Store {
         }
     }
 
+    /// Queue a write and return at once, then run `then` on the writer once the
+    /// transaction is settled: with the job's value when it committed, `None`
+    /// when it failed or did not commit (errors go to the logger, as for
+    /// [`Store::write`]). Hooks run in queue order, after the data is visible
+    /// to readers. A hook must not wait on the store's writer.
+    pub fn write_then<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+        then: impl FnOnce(Option<T>) + Send + 'static,
+    ) {
+        let job: Job = Box::new(move |c| match f(c) {
+            Ok(v) => Step { ok: true, log: None, then: Some(Box::new(move |committed| then(committed.then_some(v)))) },
+            Err(e) => Step { ok: false, log: Some(format!("store write failed: {e}")), then: Some(Box::new(move |_| then(None))) },
+        });
+        if let Err(e) = self.send(job) {
+            self.log(e.0);
+        }
+    }
+
     /// Queue a write and wait for its result. Runs in a transaction like
     /// [`Store::write`]; the result arrives after the commit.
     pub fn write_sync<T: Send + 'static>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static) -> Result<T, StoreError> {
@@ -393,6 +412,33 @@ mod tests {
         s.write(|c| c.execute("INSERT INTO nope VALUES (1)", []).map(|_| ()));
         assert_eq!(s.write_sync(|c| meta_set(c, "x", "y")), Ok(()));
         assert_eq!(s.queue_len(), 0);
+    }
+
+    #[test]
+    fn write_then_runs_its_hook_after_the_commit_with_the_outcome() {
+        let dir = trunk_recorder_plugin::testing::temp_dir("store");
+        let s = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (reader, sent) = (s.clone(), tx.clone());
+        s.write_then(
+            |c| meta_set(c, "k", "v").map(|_| 42),
+            move |v| {
+                // A reader (not the writer's connection) sees the row by the time the hook runs.
+                let seen = reader.read(|c| meta_get(c, "k")).unwrap();
+                sent.send((v, seen)).unwrap();
+            },
+        );
+        s.write_then(
+            |c| {
+                meta_set(c, "half", "done")?;
+                c.execute("INSERT INTO nope VALUES (1)", []).map(|_| 7)
+            },
+            move |v| tx.send((v, None)).unwrap(),
+        );
+        s.flush();
+        assert_eq!(rx.recv().unwrap(), (Some(42), Some("v".into())));
+        assert_eq!(rx.recv().unwrap(), (None, None));
+        assert_eq!(s.read(|c| meta_get(c, "half")).unwrap(), None);
     }
 
     #[test]
