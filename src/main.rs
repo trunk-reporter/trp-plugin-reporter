@@ -1,6 +1,8 @@
 //! reporter — a Trunk Recorder Pro plugin that keeps call, unit and talkgroup
 //! history in SQLite and serves tr-engine's API and pages.
 
+mod affiliations;
+mod bus;
 mod config;
 mod plugin;
 mod store;
