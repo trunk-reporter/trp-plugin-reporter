@@ -1,9 +1,12 @@
 //! The SQLite store: one writer thread applies queued closures in order on the
 //! single writing connection; a small pool of other connections serves reads.
 // Later tasks use these items; until then the binary does not.
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 pub mod systems;
+
+use rusqlite::ToSql;
+use rusqlite::types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef};
 
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -16,8 +19,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
-pub use systems::{meta_get, meta_set};
-
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 const READERS: usize = 4;
@@ -26,6 +27,39 @@ const READERS: usize = 4;
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
+
+macro_rules! id_type {
+    ($(#[$m:meta])* $name:ident) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub struct $name(pub i64);
+
+        impl ToSql for $name {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                self.0.to_sql()
+            }
+        }
+
+        impl FromSql for $name {
+            fn column_result(v: ValueRef<'_>) -> FromSqlResult<Self> {
+                i64::column_result(v).map($name)
+            }
+        }
+    };
+}
+
+id_type!(
+    /// Row id in `systems`.
+    SystemId
+);
+id_type!(
+    /// Row id in `sites`.
+    SiteId
+);
+id_type!(
+    /// Row id in `calls`.
+    CallId
+);
 
 /// A store failure, as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +79,15 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-type Job = Box<dyn FnOnce(&Connection) -> rusqlite::Result<()> + Send>;
+/// What a job reports to the writer: whether to commit, an error to log, and
+/// something to run once the transaction is settled (true = committed).
+struct Step {
+    ok: bool,
+    log: Option<String>,
+    then: Option<Box<dyn FnOnce(bool) + Send>>,
+}
+
+type Job = Box<dyn FnOnce(&Connection) -> Step + Send>;
 type Logger = Arc<dyn Fn(String) + Send + Sync>;
 
 struct Inner {
@@ -162,20 +204,38 @@ impl Store {
         })
     }
 
+    fn log(&self, msg: String) {
+        let log = lock(&self.inner.logger).clone();
+        let _ = catch_unwind(AssertUnwindSafe(|| log(msg)));
+    }
+
     /// Queue a write and return at once. Errors go to the logger.
+    ///
+    /// The closure runs inside a transaction that commits only if it returns
+    /// `Ok`. Do not `BEGIN` or `COMMIT` in it; use `SAVEPOINT` to nest.
     pub fn write(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<()> + Send + 'static) {
-        if let Err(e) = self.send(Box::new(f)) {
-            let log = lock(&self.inner.logger).clone();
-            log(e.0);
+        let job: Job = Box::new(move |c| match f(c) {
+            Ok(()) => Step { ok: true, log: None, then: None },
+            Err(e) => Step { ok: false, log: Some(format!("store write failed: {e}")), then: None },
+        });
+        if let Err(e) = self.send(job) {
+            self.log(e.0);
         }
     }
 
-    /// Queue a write and wait for its result.
+    /// Queue a write and wait for its result. Runs in a transaction like
+    /// [`Store::write`]; the result arrives after the commit.
     pub fn write_sync<T: Send + 'static>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static) -> Result<T, StoreError> {
         let (rtx, rrx) = mpsc::sync_channel::<Result<T, StoreError>>(1);
         self.send(Box::new(move |c| {
-            let _ = rtx.send(f(c).map_err(StoreError::from));
-            Ok(())
+            let r = f(c).map_err(StoreError::from);
+            Step {
+                ok: r.is_ok(),
+                log: None,
+                then: Some(Box::new(move |committed| {
+                    let _ = rtx.send(if committed || r.is_err() { r } else { Err(StoreError("commit failed".into())) });
+                })),
+            }
         }))?;
         // A panicking closure drops the sender without a reply.
         rrx.recv().map_err(|_| StoreError("write failed before it returned".into()))?
@@ -191,9 +251,12 @@ impl Store {
     /// Wait until every write queued before this call has been applied.
     pub fn flush(&self) {
         let (rtx, rrx) = mpsc::sync_channel::<()>(1);
-        let sent = self.send(Box::new(move |_| {
-            let _ = rtx.send(());
-            Ok(())
+        let sent = self.send(Box::new(move |_| Step {
+            ok: true,
+            log: None,
+            then: Some(Box::new(move |_| {
+                let _ = rtx.send(());
+            })),
         }));
         if sent.is_ok() {
             let _ = rrx.recv();
@@ -207,21 +270,41 @@ impl Store {
 }
 
 fn writer_loop(conn: Connection, rx: Receiver<Job>, queued: Arc<AtomicUsize>, logger: Arc<Mutex<Logger>>) {
+    let log = |msg: String| {
+        let l = lock(&logger).clone();
+        // A panicking logger must not take the writer down.
+        let _ = catch_unwind(AssertUnwindSafe(|| l(msg)));
+    };
     while let Ok(job) = rx.recv() {
-        let result = catch_unwind(AssertUnwindSafe(|| job(&conn)));
-        queued.fetch_sub(1, Ordering::SeqCst);
-        let msg = match result {
-            Ok(Ok(())) => continue,
-            Ok(Err(e)) => format!("store write failed: {e}"),
-            Err(_) => "store write panicked".to_string(),
+        let result = match conn.unchecked_transaction() {
+            Ok(tx) => catch_unwind(AssertUnwindSafe(|| {
+                let step = job(&tx);
+                let committed = step.ok && tx.commit().is_ok();
+                (step, committed)
+            }))
+            .map_err(|_| "store write panicked".to_string()),
+            Err(e) => Err(format!("store write could not begin: {e}")),
         };
-        let log = lock(&logger).clone();
-        log(msg);
+        queued.fetch_sub(1, Ordering::SeqCst);
+        match result {
+            Ok((step, committed)) => {
+                if let Some(msg) = step.log {
+                    log(msg);
+                } else if step.ok && !committed {
+                    log("store commit failed".into());
+                }
+                if let Some(then) = step.then {
+                    let _ = catch_unwind(AssertUnwindSafe(|| then(committed)));
+                }
+            }
+            Err(msg) => log(msg),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::systems::{meta_get, meta_set};
     use super::*;
 
     #[test]
@@ -278,5 +361,40 @@ mod tests {
         assert_eq!(s.write_sync(|c| meta_set(c, "x", "y")), Ok(()));
         assert_eq!(seen.lock().unwrap().len(), 2);
         assert_eq!(s.read(|c| meta_get(c, "x")).unwrap(), Some("y".into()));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_nothing_behind() {
+        let s = Store::in_memory();
+        s.write(|c| {
+            c.execute("INSERT INTO meta VALUES ('half', 'done')", [])?;
+            c.execute("INSERT INTO nope VALUES (1)", []).map(|_| ())
+        });
+        s.flush();
+        // Read on the writer's own connection, which would see an uncommitted row.
+        let left = s.write_sync(|c| meta_get(c, "half")).unwrap();
+        assert_eq!(left, None);
+        let r = s.write_sync(|c| {
+            meta_set(c, "k", "v")?;
+            c.execute("INSERT INTO nope VALUES (1)", []).map(|_| ())
+        });
+        assert!(r.is_err());
+        assert_eq!(s.write_sync(|c| meta_get(c, "k")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_panicking_logger_does_not_stop_the_writer() {
+        let s = Store::in_memory();
+        s.set_logger(Arc::new(|_| panic!("logger boom")));
+        s.write(|c| c.execute("INSERT INTO nope VALUES (1)", []).map(|_| ()));
+        assert_eq!(s.write_sync(|c| meta_set(c, "x", "y")), Ok(()));
+        assert_eq!(s.queue_len(), 0);
+    }
+
+    #[test]
+    fn id_types_bind_and_read_back() {
+        let s = Store::in_memory();
+        let id: CallId = s.read(|c| c.query_row("SELECT ?1", [CallId(42)], |r| r.get(0))).unwrap();
+        assert_eq!(id, CallId(42));
     }
 }
