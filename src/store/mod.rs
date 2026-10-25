@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod calls;
+pub mod recorder;
 pub mod systems;
 pub mod talkgroups;
 pub mod units;
