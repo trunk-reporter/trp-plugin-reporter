@@ -275,13 +275,18 @@ fn param<'a>(q: &'a Query, name: &str) -> Option<&'a str> {
     q.get(name).map(|v| v.trim()).filter(|v| !v.is_empty())
 }
 
-/// `limit` (default 50, 1..=1000) and `offset` (default 0, ≥ 0).
+/// `limit` (default 50, at least 1; more than 1000 is taken as 1000, as
+/// tr-engine does: its calendar heatmap and daily overview ask for 50000)
+/// and `offset` (default 0, ≥ 0).
 pub fn pagination(q: &Query) -> Result<(u32, u32), ApiError> {
     let limit = match param(q, "limit") {
         None => 50,
-        Some(v) => {
-            v.parse::<u32>().ok().filter(|l| (1..=1000).contains(l)).ok_or_else(|| ApiError::InvalidParameter(format!("limit must be 1 to 1000, not {v}")))?
-        }
+        Some(v) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|l| *l >= 1)
+            .map(|l| l.min(1000))
+            .ok_or_else(|| ApiError::InvalidParameter(format!("limit must be 1 or more, not {v}")))?,
     };
     let offset = match param(q, "offset") {
         None => 0,
@@ -387,7 +392,9 @@ mod tests {
     #[test]
     fn parameters_parse_as_the_spec_says() {
         assert_eq!(pagination(&q(&[])).unwrap(), (50, 0));
-        assert!(pagination(&q(&[("limit", "0")])).is_err() && pagination(&q(&[("limit", "1001")])).is_err());
+        assert!(pagination(&q(&[("limit", "0")])).is_err() && pagination(&q(&[("limit", "-1")])).is_err());
+        assert_eq!(pagination(&q(&[("limit", "1001")])).unwrap(), (1000, 0), "over the maximum is the maximum, as tr-engine has it");
+        assert_eq!(pagination(&q(&[("limit", "50000")])).unwrap(), (1000, 0));
         assert_eq!(sort(&q(&[("sort", "-last_seen")]), "alpha_tag", &["alpha_tag", "last_seen"]).unwrap(), ("last_seen".into(), true));
         assert!(sort(&q(&[("sort", "bogus")]), "alpha_tag", &["alpha_tag"]).is_err());
         assert_eq!(ids(&q(&[("tgids", "1,2")]), &["tgid", "tgids"]), vec![1, 2]);

@@ -295,3 +295,13 @@ async fn talkgroup_and_unit_call_lists_work() {
     let (st, _) = get(&app, "/api/v1/talkgroups/1:5555/calls").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+/// The calendar heatmap and daily overview ask for `limit=50000`; tr-engine
+/// answers with its maximum page rather than a 400, and so do we.
+#[tokio::test]
+async fn an_oversized_limit_is_the_maximum_page() {
+    let (app, ..) = app();
+    let (st, v) = get(&app, "/api/v1/calls?limit=50000").await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["limit"], 1000, "{v}");
+}
