@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="card-title" content="Unit Export" />
+  <meta name="card-description" content="Browse and export unit IDs and tags to CSV" />
+  <title>Unit Export</title>
+
+  <script src="auth.js?v=1"></script>
+  <script src="theme-config.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-body, 'Inter', sans-serif);
+      background: var(--bg, #0f1117);
+      color: var(--text, #e2e8f0);
+      min-height: 100vh;
+      padding-top: 64px; /* room for injected sticky nav */
+    }
+
+    .page-wrapper {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 4rem;
+    }
+
+    /* ── Header ─────────────────────────────────────── */
+    .page-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-bottom: 1.75rem;
+    }
+
+    .page-title {
+      font-family: var(--font-display, monospace);
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--text, #e2e8f0);
+      letter-spacing: -0.02em;
+    }
+
+    .page-subtitle {
+      font-size: 0.85rem;
+      color: var(--text-muted, #94a3b8);
+      margin-top: 0.25rem;
+    }
+
+    /* ── Controls bar ────────────────────────────────── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      background: var(--bg-surface, #1a1f2e);
+      border: 1px solid var(--border, rgba(255,255,255,0.08));
+      border-radius: var(--radius, 8px);
+      padding: 0.85rem 1.1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .search-wrap {
+      flex: 1;
+      min-width: 180px;
+      position: relative;
+    }
+
+    .search-wrap svg {
+      position: absolute;
+      left: 0.65rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted, #94a3b8);
+      pointer-events: none;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 0.45rem 0.75rem 0.45rem 2rem;
+      background: var(--bg-elevated, #222840);
+      border: 1px solid var(--border, rgba(255,255,255,0.1));
+      border-radius: var(--radius-sm, 6px);
+      color: var(--text, #e2e8f0);
+      font-family: var(--font-body, inherit);
+      font-size: 0.875rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .search-input::placeholder { color: var(--text-faint, #4b5563); }
+    .search-input:focus { border-color: var(--accent, #6366f1); }
+
+    .toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--text-mid, #cbd5e1);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    /* custom checkbox */
+    .toggle-label input[type="checkbox"] {
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border-hover, rgba(255,255,255,0.2));
+      border-radius: 4px;
+      background: var(--bg-elevated, #222840);
+      cursor: pointer;
+      position: relative;
+      flex-shrink: 0;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .toggle-label input[type="checkbox"]:checked {
+      background: var(--accent, #6366f1);
+      border-color: var(--accent, #6366f1);
+    }
+    .toggle-label input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      left: 3px; top: 0px;
+      width: 5px; height: 9px;
+      border: 2px solid #fff;
+      border-top: none; border-left: none;
+      transform: rotate(45deg);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.45rem 1rem;
+      border-radius: var(--radius-sm, 6px);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s, transform 0.1s;
+      white-space: nowrap;
+      font-family: var(--font-body, inherit);
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-export {
+      background: var(--accent, #6366f1);
+      color: #fff;
+    }
+    .btn-export:hover:not(:disabled) { opacity: 0.88; }
+
+    .btn-refresh {
+      background: var(--bg-elevated, #222840);
+      color: var(--text-mid, #cbd5e1);
+      border: 1px solid var(--border, rgba(255,255,255,0.1));
+    }
+    .btn-refresh:hover:not(:disabled) { border-color: var(--border-hover, rgba(255,255,255,0.2)); }
+
+    /* ── System select ───────────────────────────────── */
+    .system-select-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .system-select-wrap .sel-icon {
+      position: absolute;
+      left: 0.6rem;
+      pointer-events: none;
+      color: var(--text-muted, #94a3b8);
+      display: flex;
+      align-items: center;
+    }
+    .system-select {
+      appearance: none;
+      -webkit-appearance: none;
+      padding: 0.45rem 1.8rem 0.45rem 1.9rem;
+      background: var(--bg-elevated, #222840);
+      border: 1px solid var(--border, rgba(255,255,255,0.1));
+      border-radius: var(--radius-sm, 6px);
+      color: var(--text-mid, #cbd5e1);
+      font-family: var(--font-body, inherit);
+      font-size: 0.875rem;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s;
+      min-width: 160px;
+    }
+    .system-select:focus { border-color: var(--accent, #6366f1); }
+    .system-select option {
+      background: var(--bg-elevated, #222840);
+      color: var(--text, #e2e8f0);
+    }
+    .system-select-wrap::after {
+      content: '';
+      position: absolute;
+      right: 0.65rem;
+      width: 0; height: 0;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid var(--text-muted, #94a3b8);
+      pointer-events: none;
+    }
+
+    /* ── Stats strip ─────────────────────────────────── */
+    .stats-strip {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 1rem;
+      font-size: 0.8rem;
+      color: var(--text-muted, #94a3b8);
+    }
+
+    .stat-item strong {
+      color: var(--accent-light, #818cf8);
+      font-weight: 700;
+    }
+
+    /* ── Progress bar ────────────────────────────────── */
+    .progress-bar-wrap {
+      height: 3px;
+      background: var(--bg-elevated, #222840);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-bottom: 1rem;
+      transition: opacity 0.3s;
+    }
+    .progress-bar-wrap.hidden { opacity: 0; }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent, #6366f1);
+      border-radius: 99px;
+      transition: width 0.3s ease;
+    }
+
+    /* ── Table ───────────────────────────────────────── */
+    .table-container {
+      border: 1px solid var(--border, rgba(255,255,255,0.08));
+      border-radius: var(--radius, 8px);
+      overflow: clip;
+      box-shadow: var(--shadow-panel, 0 4px 24px rgba(0,0,0,0.3));
+    }
+
+    .unit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+
+    .unit-table thead {
+      background: var(--bg-elevated, #222840);
+    }
+
+    .unit-table th {
+      padding: 0.7rem 1rem;
+      text-align: left;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted, #94a3b8);
+      border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+      cursor: pointer;
+      white-space: nowrap;
+      position: sticky;
+      top: 64px;
+      background: var(--bg-elevated, #222840);
+      z-index: 5;
+    }
+    .unit-table th:hover { color: var(--text, #e2e8f0); }
+    .unit-table th .sort-icon { margin-left: 4px; opacity: 0.5; }
+    .unit-table th.sorted { color: var(--accent-light, #818cf8); }
+    .unit-table th.sorted .sort-icon { opacity: 1; }
+
+    .unit-table tbody tr {
+      border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+      transition: background 0.1s;
+    }
+    .unit-table tbody tr:last-child { border-bottom: none; }
+    .unit-table tbody tr:hover { background: var(--bg-surface, #1a1f2e); }
+
+    .unit-table td {
+      padding: 0.65rem 1rem;
+      color: var(--text-mid, #cbd5e1);
+    }
+
+    .unit-id-cell {
+      font-family: var(--font-mono, monospace);
+      color: var(--accent-light, #818cf8);
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+
+    .tag-cell {
+      color: var(--text, #e2e8f0);
+      font-weight: 500;
+    }
+
+    .empty-tag {
+      font-style: italic;
+      color: var(--text-faint, #4b5563);
+      font-size: 0.8rem;
+    }
+
+    .system-cell {
+      font-size: 0.78rem;
+      color: var(--text-muted, #94a3b8);
+    }
+
+    .last-seen-cell {
+      font-size: 0.78rem;
+      color: var(--text-muted, #94a3b8);
+      white-space: nowrap;
+    }
+
+    /* ── Empty / loading states ──────────────────────── */
+    .state-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 4rem 2rem;
+      color: var(--text-muted, #94a3b8);
+      font-size: 0.9rem;
+      gap: 0.75rem;
+    }
+
+    .state-panel svg {
+      opacity: 0.3;
+      width: 48px;
+      height: 48px;
+    }
+
+    .spinner {
+      width: 28px; height: 28px;
+      border: 3px solid var(--bg-elevated, #222840);
+      border-top-color: var(--accent, #6366f1);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Load more ───────────────────────────────────── */
+    .load-more-row td {
+      text-align: center;
+      padding: 0.9rem;
+    }
+
+    .btn-load-more {
+      background: var(--bg-elevated, #222840);
+      color: var(--text-mid, #cbd5e1);
+      border: 1px solid var(--border, rgba(255,255,255,0.1));
+      padding: 0.5rem 1.25rem;
+    }
+    .btn-load-more:hover { border-color: var(--accent, #6366f1); color: var(--accent-light, #818cf8); }
+
+    /* ── Export success flash ────────────────────────── */
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: var(--success, #22c55e);
+      color: #fff;
+      padding: 0.6rem 1.1rem;
+      border-radius: var(--radius-sm, 6px);
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      transform: translateY(8px);
+      opacity: 0;
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 999;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+  </style>
+</head>
+<body>
+
+<div class="page-wrapper">
+
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Unit Export</h1>
+      <p class="page-subtitle">Browse radio units and export IDs &amp; tags to CSV</p>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="search-wrap">
+      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input type="text" class="search-input" id="searchInput" placeholder="Search by unit ID or tag…" />
+    </div>
+
+    <div class="system-select-wrap">
+      <span class="sel-icon">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+        </svg>
+      </span>
+      <select class="system-select" id="systemSelect">
+        <option value="">All Systems</option>
+      </select>
+    </div>
+
+    <label class="toggle-label">
+      <input type="checkbox" id="includeEmptyTags" />
+      Include Empty Tags
+    </label>
+
+    <label class="toggle-label">
+      <input type="checkbox" id="uniqueIdsOnly" />
+      Unique IDs Only
+    </label>
+
+    <button class="btn btn-refresh" id="refreshBtn" title="Reload units">
+      <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      Refresh
+    </button>
+
+    <button class="btn btn-export" id="exportBtn" disabled>
+      <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Export CSV
+    </button>
+    <button class="btn btn-export" id="exportTRBtn" disabled>
+      <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Export TR CSV
+    </button>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-strip" id="statsStrip" style="display:none">
+    <span class="stat-item">Showing <strong id="statShowing">0</strong> units</span>
+    <span class="stat-item">Total fetched: <strong id="statTotal">0</strong></span>
+    <span class="stat-item">With tags: <strong id="statTagged">0</strong></span>
+    <span class="stat-item">Empty tags: <strong id="statEmpty">0</strong></span>
+    <span class="stat-item">Duplicates: <strong id="statDupes">0</strong></span>
+  </div>
+
+  <!-- Progress -->
+  <div class="progress-bar-wrap hidden" id="progressWrap">
+    <div class="progress-bar" id="progressBar" style="width:0%"></div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-container" id="tableContainer">
+    <div class="state-panel" id="statePanel">
+      <div class="spinner"></div>
+      <span>Loading units…</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast">
+  <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+    <polyline points="20 6 9 17 4 12"/>
+  </svg>
+  <span id="toastMsg">Exported!</span>
+</div>
+
+<script>
+(function () {
+  // ── State ────────────────────────────────────────────────
+  let allUnits = [];          // all fetched units
+  let filtered = [];          // after filter/search
+  let sortCol = 'unit_id';
+  let sortDir = 1;            // 1=asc -1=desc
+  let pageSize = 100;
+  let displayCount = pageSize;
+
+  const PAGE_FETCH = 500;     // units per API page
+
+  const $ = id => document.getElementById(id);
+
+  // ── Elements ──────────────────────────────────────────────
+  const searchInput       = $('searchInput');
+  const includeEmptyCheck = $('includeEmptyTags');
+  const uniqueIdsCheck    = $('uniqueIdsOnly');
+  const systemSelect      = $('systemSelect');
+  const exportBtn         = $('exportBtn');
+  const exportTRBtn       = $('exportTRBtn');
+  const refreshBtn        = $('refreshBtn');
+  const tableContainer    = $('tableContainer');
+  const statePanel        = $('statePanel');
+  const statsStrip        = $('statsStrip');
+  const progressWrap      = $('progressWrap');
+  const progressBar       = $('progressBar');
+  const toast             = $('toast');
+
+  // ── Fetch systems for dropdown ────────────────────────────
+  async function fetchSystems() {
+    try {
+      const r = await fetch('/api/v1/systems');
+      if (!r.ok) return;
+      const data = await r.json();
+      const systems = (data.systems || []).sort((a, b) =>
+        (a.name || '').localeCompare(b.name || ''));
+      systems.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.system_id;
+        opt.textContent = s.name || `System ${s.system_id}`;
+        systemSelect.appendChild(opt);
+      });
+    } catch (_) { /* silently ignore — dropdown stays as "All Systems" */ }
+  }
+
+  // ── Fetch all units with pagination ──────────────────────
+  async function fetchAllUnits() {
+    setLoading(true);
+    allUnits = [];
+
+    try {
+      // First fetch to get total
+      const first = await apiFetch(`/api/v1/units?limit=${PAGE_FETCH}&offset=0`);
+      if (!first.ok) throw new Error(`API error ${first.status}`);
+      const data = await first.json();
+      const total = data.total || 0;
+      const units = data.units || [];
+      allUnits = allUnits.concat(units);
+      setProgress(allUnits.length, total);
+
+      // Fetch remaining pages in parallel batches
+      if (total > PAGE_FETCH) {
+        const offsets = [];
+        for (let off = PAGE_FETCH; off < total; off += PAGE_FETCH) offsets.push(off);
+
+        // Process in batches of 5 concurrent requests
+        const batchSize = 5;
+        for (let i = 0; i < offsets.length; i += batchSize) {
+          const batch = offsets.slice(i, i + batchSize);
+          const results = await Promise.all(batch.map(async off => {
+            const r = await apiFetch(`/api/v1/units?limit=${PAGE_FETCH}&offset=${off}`);
+            if (!r.ok) return [];
+            const d = await r.json();
+            return d.units || [];
+          }));
+          for (const r of results) allUnits = allUnits.concat(r);
+          setProgress(allUnits.length, total);
+        }
+      }
+    } catch (err) {
+      showError(err.message);
+      return;
+    }
+
+    setLoading(false);
+    applyFilter();
+  }
+
+  function apiFetch(url) {
+    return fetch(url);
+  }
+
+  // ── Filter + search + sort ────────────────────────────────
+  function applyFilter() {
+    const includeEmpty   = includeEmptyCheck.checked;
+    const uniqueOnly     = uniqueIdsCheck.checked;
+    const selectedSystem = systemSelect.value; // '' = all, else system_id string
+    const query = searchInput.value.trim().toLowerCase();
+
+    let pool = allUnits.filter(u => {
+      // System filter
+      if (selectedSystem !== '' && String(u.system_id) !== selectedSystem) return false;
+      const tag = (u.alpha_tag || '').trim();
+      if (!includeEmpty && tag === '') return false;
+      if (query) {
+        const idStr = String(u.unit_id);
+        const tagL  = tag.toLowerCase();
+        if (!idStr.includes(query) && !tagL.includes(query)) return false;
+      }
+      return true;
+    });
+
+    // Deduplicate by unit_id: keep the entry with the best tag (non-empty preferred),
+    // then most recently seen, so the most useful row wins.
+    if (uniqueOnly) {
+      const seen = new Map();
+      pool.forEach(u => {
+        const key = u.unit_id;
+        if (!seen.has(key)) {
+          seen.set(key, u);
+        } else {
+          const prev = seen.get(key);
+          const prevTag  = (prev.alpha_tag || '').trim();
+          const currTag  = (u.alpha_tag   || '').trim();
+          // Prefer row with a tag over one without
+          const prevScore = prevTag !== '' ? 1 : 0;
+          const currScore = currTag !== '' ? 1 : 0;
+          if (currScore > prevScore) {
+            seen.set(key, u);
+          } else if (currScore === prevScore) {
+            // Tie-break: prefer more recently seen
+            const prevTs = prev.last_seen || '';
+            const currTs = u.last_seen   || '';
+            if (currTs > prevTs) seen.set(key, u);
+          }
+        }
+      });
+      pool = Array.from(seen.values());
+    }
+
+    filtered = pool;
+
+    // sort
+    filtered.sort((a, b) => {
+      let av, bv;
+      if (sortCol === 'unit_id') {
+        av = a.unit_id; bv = b.unit_id;
+      } else if (sortCol === 'alpha_tag') {
+        av = (a.alpha_tag || '').toLowerCase();
+        bv = (b.alpha_tag || '').toLowerCase();
+      } else if (sortCol === 'system_name') {
+        av = (a.system_name || '').toLowerCase();
+        bv = (b.system_name || '').toLowerCase();
+      } else if (sortCol === 'last_seen') {
+        av = a.last_seen || '';
+        bv = b.last_seen || '';
+      }
+      if (av < bv) return -sortDir;
+      if (av > bv) return sortDir;
+      return 0;
+    });
+
+    displayCount = pageSize;
+    renderTable();
+    updateStats();
+  }
+
+  // ── Render table ──────────────────────────────────────────
+  function renderTable() {
+    if (filtered.length === 0) {
+      tableContainer.innerHTML = '';
+      const panel = document.createElement('div');
+      panel.className = 'state-panel';
+      panel.innerHTML = `
+        <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <path d="M9.172 16.172a4 4 0 0 1 5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
+        </svg>
+        <span>No units match your filter.</span>`;
+      tableContainer.appendChild(panel);
+      exportBtn.disabled = true;
+      exportTRBtn.disabled = true;
+      return;
+    }
+
+    exportBtn.disabled = false;
+    exportTRBtn.disabled = false;
+
+    const slice = filtered.slice(0, displayCount);
+    const hasMore = filtered.length > displayCount;
+
+    const tbl = document.createElement('table');
+    tbl.className = 'unit-table';
+
+    // Header
+    const cols = [
+      { key: 'unit_id',     label: 'Unit ID'    },
+      { key: 'alpha_tag',   label: 'Tag'        },
+      { key: 'system_name', label: 'System'     },
+      { key: 'last_seen',   label: 'Last Seen'  },
+    ];
+
+    const thead = document.createElement('thead');
+    const tr = document.createElement('tr');
+    cols.forEach(c => {
+      const th = document.createElement('th');
+      th.dataset.col = c.key;
+      th.innerHTML = `${c.label}<span class="sort-icon">${sortCol === c.key ? (sortDir === 1 ? '↑' : '↓') : '⇅'}</span>`;
+      if (sortCol === c.key) th.classList.add('sorted');
+      th.addEventListener('click', () => {
+        if (sortCol === c.key) sortDir *= -1;
+        else { sortCol = c.key; sortDir = 1; }
+        applyFilter();
+      });
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    tbl.appendChild(thead);
+
+    // Body
+    const tbody = document.createElement('tbody');
+    slice.forEach(u => {
+      const row = document.createElement('tr');
+      const tag = (u.alpha_tag || '').trim();
+      const lastSeen = u.last_seen ? formatDate(u.last_seen) : '—';
+      row.innerHTML = `
+        <td class="unit-id-cell">${u.unit_id}</td>
+        <td class="tag-cell">${tag !== '' ? escHtml(tag) : '<span class="empty-tag">—</span>'}</td>
+        <td class="system-cell">${escHtml(u.system_name || '—')}</td>
+        <td class="last-seen-cell">${lastSeen}</td>`;
+      tbody.appendChild(row);
+    });
+
+    if (hasMore) {
+      const loadRow = document.createElement('tr');
+      loadRow.className = 'load-more-row';
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-load-more';
+      btn.textContent = `Load more (${filtered.length - displayCount} remaining)`;
+      btn.addEventListener('click', () => {
+        displayCount += pageSize;
+        renderTable();
+      });
+      td.appendChild(btn);
+      loadRow.appendChild(td);
+      tbody.appendChild(loadRow);
+    }
+
+    tbl.appendChild(tbody);
+    tableContainer.innerHTML = '';
+    tableContainer.appendChild(tbl);
+  }
+
+  // ── Stats ─────────────────────────────────────────────────
+  function updateStats() {
+    statsStrip.style.display = 'flex';
+    // count duplicates as unit_ids that appear more than once
+    const idCounts = new Map();
+    allUnits.forEach(u => idCounts.set(u.unit_id, (idCounts.get(u.unit_id) || 0) + 1));
+    const dupeCount = Array.from(idCounts.values()).filter(c => c > 1).reduce((s, c) => s + (c - 1), 0);
+
+    $('statShowing').textContent = filtered.length.toLocaleString();
+    $('statTotal').textContent   = allUnits.length.toLocaleString();
+    $('statTagged').textContent  = allUnits.filter(u => (u.alpha_tag||'').trim() !== '').length.toLocaleString();
+    $('statEmpty').textContent   = allUnits.filter(u => (u.alpha_tag||'').trim() === '').length.toLocaleString();
+    $('statDupes').textContent   = dupeCount.toLocaleString();
+  }
+
+  // ── Export CSV ────────────────────────────────────────────
+  function exportCSV() {
+    const rows = [['Unit ID', 'Tag', 'System', 'Last Seen']];
+    filtered.forEach(u => {
+      rows.push([
+        u.unit_id,
+        (u.alpha_tag || '').trim(),
+        u.system_name || '',
+        u.last_seen   || '',
+      ]);
+    });
+
+    const csv = rows.map(r =>
+      r.map(v => {
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(',')
+    ).join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `unit-tags-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showToast(`Exported ${filtered.length.toLocaleString()} units`);
+  }
+
+  // TR-compatible export: headerless two-column format (unit_id,alpha_tag)
+  // Matches the format expected by trunk-recorder's unitTagsFile CSV.
+  function exportTRCSV() {
+    const rows = filtered.map(u => [
+      u.unit_id,
+      (u.alpha_tag || '').trim(),
+    ]);
+
+    const csv = rows.map(r =>
+      r.map(v => {
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(',')
+    ).join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `unit-tags-tr-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showToast(`Exported ${filtered.length.toLocaleString()} units (TR format)`);
+  }
+
+  // ── Helpers ───────────────────────────────────────────────
+  function setLoading(on) {
+    if (on) {
+      progressWrap.classList.remove('hidden');
+      tableContainer.innerHTML = '';
+      const panel = document.createElement('div');
+      panel.className = 'state-panel';
+      panel.id = 'statePanel';
+      panel.innerHTML = '<div class="spinner"></div><span>Fetching units…</span>';
+      tableContainer.appendChild(panel);
+      exportBtn.disabled = true;
+      exportTRBtn.disabled = true;
+      refreshBtn.disabled = true;
+    } else {
+      progressWrap.classList.add('hidden');
+      refreshBtn.disabled = false;
+    }
+  }
+
+  function setProgress(done, total) {
+    const pct = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+    progressBar.style.width = pct + '%';
+    const sp = document.querySelector('#statePanel span');
+    if (sp) sp.textContent = `Fetching units… ${done.toLocaleString()} / ${total.toLocaleString()}`;
+  }
+
+  function showError(msg) {
+    progressWrap.classList.add('hidden');
+    refreshBtn.disabled = false;
+    tableContainer.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.className = 'state-panel';
+    panel.innerHTML = `
+      <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="color:var(--danger,#ef4444)">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <span style="color:var(--danger,#ef4444)">Error: ${escHtml(msg)}</span>
+      <button class="btn btn-refresh" onclick="location.reload()">Retry</button>`;
+    tableContainer.appendChild(panel);
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    const now = new Date();
+    const diff = Math.floor((now - d) / 1000);
+    if (diff < 60)    return `${diff}s ago`;
+    if (diff < 3600)  return `${Math.floor(diff/60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+    return d.toLocaleDateString();
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  function showToast(msg) {
+    $('toastMsg').textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 2800);
+  }
+
+  // ── Events ────────────────────────────────────────────────
+  exportBtn.addEventListener('click', exportCSV);
+  exportTRBtn.addEventListener('click', exportTRCSV);
+  refreshBtn.addEventListener('click', fetchAllUnits);
+
+  let searchTimer;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(applyFilter, 200);
+  });
+
+  includeEmptyCheck.addEventListener('change', applyFilter);
+  uniqueIdsCheck.addEventListener('change', applyFilter);
+  systemSelect.addEventListener('change', applyFilter);
+
+  // ── Boot ──────────────────────────────────────────────────
+  fetchSystems();
+  fetchAllUnits();
+})();
+</script>
+
+<script src="theme-engine.js?v=2"></script>
+</body>
+</html>

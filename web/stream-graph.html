@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="auth.js?v=1"></script>
+  <title>Signal Flow — tr-engine</title>
+  <meta name="card-title" content="Signal Flow">
+  <meta name="card-description" content="Stream graph visualization of radio traffic by talkgroup over time">
+  <meta name="card-order" content="4">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;700&family=Outfit:wght@200;300;400;500;600;700;800;900&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Karla:wght@200;300;400;500&family=Syne:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&family=VT323&family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet">
+
+  <script src="theme-config.js"></script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-weight: var(--font-weight-body);
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.5s, color 0.4s;
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before {
+      content: ''; position: fixed; inset: 0;
+      background-image: var(--grid-bg);
+      background-size: var(--grid-size) var(--grid-size);
+      pointer-events: none; z-index: 0;
+    }
+    body::after {
+      content: ''; position: fixed; inset: 0;
+      background: var(--scanlines);
+      pointer-events: none; z-index: 9999;
+    }
+    .vignette-overlay {
+      position: fixed; inset: 0;
+      background: var(--vignette);
+      pointer-events: none; z-index: 9998;
+      transition: background 0.6s;
+    }
+
+    .container { width: 100%; max-width: 1400px; padding: 0 40px; position: relative; z-index: 1; }
+
+    .toolbar {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    #system-select {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text);
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xs);
+      padding: 4px 10px;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.2s ease;
+    }
+    #system-select:hover, #system-select:focus {
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    }
+    #system-select option {
+      background: var(--bg-warm);
+      color: var(--text);
+    }
+    .toolbar .pulse-dot {
+      width: 7px; height: 7px;
+      background: var(--accent);
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+      box-shadow: 0 0 8px var(--accent), 0 0 20px color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.7)} }
+
+    .stats {
+      display: flex;
+      gap: 28px;
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--text-faint);
+      letter-spacing: 0.05em;
+    }
+    .stats .stat-value { color: var(--text-muted); font-weight: 500; }
+
+    /* ── Metric Selector ─────────────────────── */
+    .controls-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .metric-bar-label {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+      margin-right: 8px;
+    }
+    .metric-btn {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 0.04em;
+      color: var(--text-faint);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xs);
+      padding: 5px 12px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      white-space: nowrap;
+    }
+    .metric-btn:hover {
+      color: var(--text-muted);
+      border-color: var(--text-faint);
+    }
+    .metric-btn.active {
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+      background: color-mix(in srgb, var(--accent) 6%, transparent);
+      box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 8%, transparent);
+    }
+    .metric-desc {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-faint);
+      letter-spacing: 0.02em;
+      opacity: 0.7;
+    }
+
+    /* ── Layout Toggle ───────────────────────── */
+    .controls-separator {
+      width: 1px;
+      height: 18px;
+      background: var(--border);
+      margin: 0 10px;
+    }
+    .layout-btn {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 400;
+      letter-spacing: 0.04em;
+      color: var(--text-faint);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xs);
+      padding: 5px 12px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      white-space: nowrap;
+    }
+    .layout-btn:hover {
+      color: var(--text-muted);
+      border-color: var(--text-faint);
+    }
+    .layout-btn.active {
+      color: var(--magenta);
+      border-color: color-mix(in srgb, var(--magenta) 35%, transparent);
+      background: color-mix(in srgb, var(--magenta) 6%, transparent);
+      box-shadow: 0 0 12px color-mix(in srgb, var(--magenta) 8%, transparent);
+    }
+
+    /* ── Graph ────────────────────────────────── */
+    .graph-wrapper {
+      position: relative;
+      width: 100%;
+      height: 460px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--bg-warm) 30%, transparent) 0%, color-mix(in srgb, var(--bg) 60%, transparent) 50%, color-mix(in srgb, var(--bg-warm) 30%, transparent) 100%);
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .graph-wrapper::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 3px, color-mix(in srgb, var(--accent) 1%, transparent) 3px, color-mix(in srgb, var(--accent) 1%, transparent) 4px);
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    .now-zone {
+      position: absolute;
+      right: 0; top: 0;
+      width: 100px; height: 100%;
+      background: linear-gradient(270deg, color-mix(in srgb, var(--accent) 6%, transparent) 0%, transparent 100%);
+      border-right: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+      pointer-events: none;
+      z-index: 2;
+    }
+    .now-label {
+      position: absolute;
+      right: 12px; top: 12px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--accent);
+      opacity: 0.6;
+    }
+    .decay-zone {
+      position: absolute;
+      left: 0; top: 0;
+      width: 160px; height: 100%;
+      background: linear-gradient(90deg, var(--bg), transparent);
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    #graph { width: 100%; height: 100%; position: relative; z-index: 2; }
+
+    .stream-path {
+      transition: opacity 0.3s ease, filter 0.3s ease;
+      cursor: pointer;
+    }
+    .stream-path.dimmed { opacity: 0.06 !important; }
+    .stream-path.highlighted { filter: drop-shadow(0 0 8px var(--stream-color)); }
+
+    .time-markers {
+      display: flex;
+      margin-top: 10px;
+      position: relative;
+      height: 18px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-faint);
+      letter-spacing: 0.06em;
+    }
+    .time-marker {
+      position: absolute;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 18px;
+      margin-top: 16px;
+      max-width: 100%;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-faint);
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: color 0.2s ease;
+      white-space: nowrap;
+    }
+    .legend-item:hover { color: var(--text-muted); }
+    .legend-item.active { color: var(--text); }
+    .legend-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text);
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      z-index: 100;
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+      min-width: 190px;
+    }
+    .tooltip.visible { opacity: 1; }
+    .tooltip .tt-name { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+    .tooltip .tt-group { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+    .tooltip .tt-stats { display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 10px; }
+    .tooltip .tt-label { color: var(--text-faint); }
+    .tooltip .tt-val { color: var(--text-muted); text-align: right; }
+    .tooltip .tt-roster-label, .tooltip .tt-roster-val { border-top: 1px solid var(--border); padding-top: 4px; margin-top: 2px; }
+    .tooltip .tt-roster-val { color: var(--accent); opacity: 0.8; }
+
+    .crosshair-line { stroke: color-mix(in srgb, var(--accent) 15%, transparent); stroke-width: 1; stroke-dasharray: 3,5; pointer-events: none; }
+    .crosshair-time { font-family: var(--font-mono); font-size: 9px; fill: var(--text-faint); pointer-events: none; }
+
+    /* ── Bucket Detail ───────────────────────── */
+    .tt-detail {
+      border-top: 1px solid var(--border);
+      margin-top: 8px;
+      padding-top: 6px;
+      max-height: 170px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    .tt-detail-header {
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+      margin-bottom: 4px;
+    }
+    .tt-detail-loading {
+      font-size: 9px;
+      color: var(--text-faint);
+      font-style: italic;
+    }
+    .tt-detail-empty {
+      font-size: 9px;
+      color: var(--text-faint);
+      opacity: 0.6;
+    }
+    .tt-call-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 2px 0;
+      font-size: 9px;
+      color: var(--text-muted);
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+    }
+    .tt-call-row:last-child { border-bottom: none; }
+    .tt-call-row.emergency { color: var(--danger); }
+    .tt-call-time { flex-shrink: 0; width: 56px; }
+    .tt-call-dur { flex-shrink: 0; width: 36px; text-align: right; }
+    .tt-call-units { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tt-call-emg { color: var(--danger); font-weight: 600; flex-shrink: 0; }
+
+    .theme-label {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      z-index: 10000; font-family: var(--font-display); font-size: 12px;
+      letter-spacing: 3px; text-transform: uppercase; color: var(--accent);
+      background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border); padding: 10px 24px; border-radius: 100px;
+      transition: all 0.5s; pointer-events: none; opacity: 0;
+    }
+    .theme-label.show { opacity: 1; }
+
+    @media (max-width: 768px) {
+      .container { padding: 0 12px; }
+      .toolbar { flex-wrap: wrap; gap: 8px; }
+      .stats { gap: 12px; font-size: 10px; }
+      .controls-row { flex-wrap: wrap; }
+      .graph-wrapper { height: 320px; }
+    }
+  </style>
+</head>
+<body>
+<div class="vignette-overlay"></div>
+<div class="container">
+  <div class="toolbar">
+    <div class="pulse-dot"></div>
+    <select id="system-select"></select>
+    <div class="stats">
+      <span>Channels <span class="stat-value" id="stat-channels">0</span></span>
+      <span>Current <span class="stat-value" id="stat-total">0</span></span>
+      <span>Peak <span class="stat-value" id="stat-peak">0</span></span>
+      <span>Affiliated <span class="stat-value" id="stat-affiliated">0</span></span>
+      <span>Window <span class="stat-value">3h</span></span>
+    </div>
+  </div>
+
+  <div class="controls-row">
+    <span class="metric-bar-label">Metric</span>
+    <button class="metric-btn active" data-metric="calls">Call Rate</button>
+    <button class="metric-btn" data-metric="airtime">Airtime</button>
+    <button class="metric-btn" data-metric="units">Active Units</button>
+    <button class="metric-btn" data-metric="roster">Roster</button>
+    <button class="metric-btn" data-metric="affiliations">Affiliations</button>
+    <div class="controls-separator"></div>
+    <span class="metric-bar-label">Layout</span>
+    <button class="layout-btn active" data-layout="volume">Volume</button>
+    <button class="layout-btn" data-layout="proportion">Proportion</button>
+    <button class="layout-btn" data-layout="stacked">Stacked</button>
+    <span class="metric-desc" id="metric-desc">calls per minute per talkgroup</span>
+  </div>
+
+  <div class="graph-wrapper">
+    <div class="now-zone"><div class="now-label">now</div></div>
+    <div class="decay-zone"></div>
+    <svg id="graph"></svg>
+  </div>
+  <div class="time-markers" id="time-markers"></div>
+  <div class="legend" id="legend"></div>
+</div>
+
+<div class="tooltip" id="tooltip">
+  <div class="tt-name" id="tt-name"></div>
+  <div class="tt-group" id="tt-group"></div>
+  <div class="tt-stats">
+    <span class="tt-label">Current</span><span class="tt-val" id="tt-current"></span>
+    <span class="tt-label">1h avg</span><span class="tt-val" id="tt-avg"></span>
+    <span class="tt-label">Peak</span><span class="tt-val" id="tt-peak"></span>
+    <span class="tt-label">% of total</span><span class="tt-val" id="tt-pct"></span>
+    <span class="tt-label tt-roster-label" id="tt-roster-label">Roster</span><span class="tt-val tt-roster-val" id="tt-roster"></span>
+  </div>
+  <div class="tt-detail" id="tt-detail" style="display:none"></div>
+</div>
+
+<div class="theme-label" id="themeLabel"></div>
+
+<script type="module">
+import { init as initData, destroy as destroyData, BUCKET_SEC, WINDOW_SEC } from './signal-flow-data.js';
+
+const METRICS = {
+  calls:        { label: 'Call Rate',     unit: '/min',   desc: 'calls per minute per talkgroup' },
+  airtime:      { label: 'Airtime',       unit: 's/min',  desc: 'seconds of audio per minute per talkgroup' },
+  units:        { label: 'Active Units',  unit: ' units', desc: 'unique transmitting radios per talkgroup' },
+  roster:       { label: 'Roster',        unit: ' units', desc: 'affiliated radios per talkgroup — who\'s listening' },
+  affiliations: { label: 'Affiliations',  unit: '/min',   desc: 'talkgroup join events per minute — leading indicator' },
+};
+
+let activeMetric = 'calls';
+let activeLayout = 'volume';
+
+const LAYOUT_DESCS = {
+  volume: 'organic flow — stream width = absolute value',
+  proportion: 'normalized — stream width = % of total, constant river width',
+  stacked: 'zero-baseline — shows total volume + composition',
+};
+
+const COLOR_PALETTE = [
+  '#00e5ff', '#f43f5e', '#a855f7', '#f59e0b', '#10b981',
+  '#38bdf8', '#fb923c', '#818cf8', '#c084fc', '#34d399',
+  '#fbbf24', '#f87171', '#22d3ee', '#e879f9', '#64748b',
+];
+
+let timeSeries = [];
+let keys = [];
+let colorMap = {};
+let nameMap = {};
+let groupMap = {};
+let talkgroupMap = null;
+let highlightedKey = null;
+
+const svgEl = document.getElementById('graph');
+const svg = d3.select(svgEl);
+const tooltipEl = document.getElementById('tooltip');
+const ttName = document.getElementById('tt-name');
+const ttGroup = document.getElementById('tt-group');
+const ttCurrent = document.getElementById('tt-current');
+const ttAvg = document.getElementById('tt-avg');
+const ttPeak = document.getElementById('tt-peak');
+const ttPct = document.getElementById('tt-pct');
+const statChannels = document.getElementById('stat-channels');
+const statTotal = document.getElementById('stat-total');
+const statPeakEl = document.getElementById('stat-peak');
+const statAffiliated = document.getElementById('stat-affiliated');
+const metricDesc = document.getElementById('metric-desc');
+const ttRoster = document.getElementById('tt-roster');
+const ttRosterLabel = document.getElementById('tt-roster-label');
+
+let width, height, margin;
+const xScale = d3.scaleLinear();
+const yScale = d3.scaleLinear();
+
+const stack = d3.stack()
+  .offset(d3.stackOffsetWiggle)
+  .order(d3.stackOrderInsideOut);
+
+const area = d3.area()
+  .curve(d3.curveBasis)
+  .x((d, i) => xScale(i))
+  .y0(d => yScale(d[0]))
+  .y1(d => yScale(d[1]));
+
+const defsEl = svg.append('defs');
+const gridGroup = svg.append('g');
+const streamGroup = svg.append('g');
+const crosshairGroup = svg.append('g').style('display', 'none');
+const crosshairLine = crosshairGroup.append('line').attr('class', 'crosshair-line');
+const crosshairLabel = crosshairGroup.append('text').attr('class', 'crosshair-time');
+
+const TIME_LABELS = [
+  { sec: 300, label: '5m' }, { sec: 600, label: '10m' },
+  { sec: 1800, label: '30m' }, { sec: 3600, label: '1h' },
+  { sec: 7200, label: '2h' }, { sec: 10800, label: '3h' },
+];
+
+function setupTalkgroups(talkgroups) {
+  keys = talkgroups.map(tg => String(tg.tgid));
+  colorMap = {};
+  nameMap = {};
+  groupMap = {};
+
+  talkgroups.forEach((tg, i) => {
+    const key = String(tg.tgid);
+    const color = COLOR_PALETTE[i % COLOR_PALETTE.length];
+    colorMap[key] = color;
+    nameMap[key] = tg.alpha_tag || `TG ${tg.tgid}`;
+    groupMap[key] = tg.group || tg.tag || '';
+    tg.color = color;
+  });
+
+  stack.keys(keys);
+
+  defsEl.selectAll('linearGradient').remove();
+  keys.forEach(key => {
+    const color = colorMap[key];
+    const grad = defsEl.append('linearGradient')
+      .attr('id', `grad-${key}`)
+      .attr('x1', '0%').attr('y1', '0%').attr('x2', '0%').attr('y2', '100%');
+    const c = d3.color(color);
+    grad.append('stop').attr('offset', '0%').attr('stop-color', c.brighter(0.3).formatHex()).attr('stop-opacity', 0.75);
+    grad.append('stop').attr('offset', '50%').attr('stop-color', color).attr('stop-opacity', 0.55);
+    grad.append('stop').attr('offset', '100%').attr('stop-color', c.darker(0.3).formatHex()).attr('stop-opacity', 0.75);
+  });
+
+  buildLegend();
+  statChannels.textContent = keys.length;
+}
+
+function resize() {
+  const rect = svgEl.parentElement.getBoundingClientRect();
+  width = rect.width; height = rect.height;
+  margin = { top: 20, right: 20, bottom: 20, left: 20 };
+  svgEl.setAttribute('width', width);
+  svgEl.setAttribute('height', height);
+  xScale.range([margin.left, width - margin.right]);
+  yScale.range([height - margin.bottom, margin.top]);
+  render();
+  updateTimeMarkers();
+}
+
+function updateTimeMarkers() {
+  const c = document.getElementById('time-markers');
+  c.innerHTML = '';
+  if (!width) return;
+  for (const t of TIME_LABELS) {
+    const idx = timeSeries.length - 1 - Math.round(t.sec / BUCKET_SEC);
+    if (idx < 0) continue;
+    const x = xScale(idx);
+    if (x > margin.left + 20 && x < width - margin.right - 20) {
+      const el = document.createElement('div');
+      el.className = 'time-marker';
+      el.style.left = x + 'px';
+      el.textContent = t.label + ' ago';
+      c.appendChild(el);
+    }
+  }
+}
+
+function updateGrid() {
+  gridGroup.selectAll('line').remove();
+  for (const t of TIME_LABELS) {
+    const idx = timeSeries.length - 1 - Math.round(t.sec / BUCKET_SEC);
+    if (idx < 0) continue;
+    const x = xScale(idx);
+    if (x > margin.left && x < width - margin.right) {
+      gridGroup.append('line')
+        .attr('x1', x).attr('x2', x)
+        .attr('y1', margin.top).attr('y2', height - margin.bottom)
+        .style('stroke', 'var(--border)').attr('stroke-width', 0.5)
+        .attr('stroke-dasharray', '2,6').attr('opacity', 0.4);
+    }
+  }
+}
+
+function getStackData() {
+  return timeSeries.map(b => {
+    const row = { time: b.time };
+    for (const k of keys) row[k] = (b[activeMetric] && b[activeMetric][k]) || 0;
+    return row;
+  });
+}
+
+function render() {
+  if (!width || !timeSeries.length || !keys.length) return;
+
+  if (activeLayout === 'proportion') {
+    stack.offset(d3.stackOffsetExpand).order(d3.stackOrderInsideOut);
+  } else if (activeLayout === 'stacked') {
+    stack.offset(d3.stackOffsetNone).order(d3.stackOrderInsideOut);
+  } else {
+    stack.offset(d3.stackOffsetWiggle).order(d3.stackOrderInsideOut);
+  }
+
+  const data = getStackData();
+  stack.value((d, key) => d[key] || 0);
+  xScale.domain([0, data.length - 1]);
+  const stacked = stack(data);
+
+  if (activeLayout === 'proportion') {
+    yScale.domain([0, 1]);
+  } else {
+    let yMin = Infinity, yMax = -Infinity;
+    for (const layer of stacked) {
+      for (const pt of layer) {
+        if (pt[0] < yMin) yMin = pt[0];
+        if (pt[1] > yMax) yMax = pt[1];
+      }
+    }
+    const yPad = (yMax - yMin) * 0.08;
+    yScale.domain([yMin - yPad, yMax + yPad]);
+  }
+
+  const paths = streamGroup.selectAll('.stream-path').data(stacked, d => d.key);
+
+  paths.enter()
+    .append('path')
+    .attr('class', 'stream-path')
+    .style('--stream-color', d => colorMap[d.key])
+    .attr('fill', d => `url(#grad-${d.key})`)
+    .attr('stroke', d => colorMap[d.key])
+    .attr('stroke-width', 0.5)
+    .attr('stroke-opacity', 0.3)
+    .attr('d', area)
+    .on('mouseenter', function(ev, d) { highlightStream(d.key); showTooltip(d.key, ev); scheduleDetailFetch(ev, d.key); })
+    .on('mousemove', function(ev, d) { moveTooltip(ev); updateCrosshair(ev); scheduleDetailFetch(ev, d.key); })
+    .on('mouseleave', function() { unhighlightAll(); hideTooltip(); hideCrosshair(); clearDetail(); });
+
+  paths.transition().duration(600).ease(d3.easeCubicOut).attr('d', area);
+  paths.exit().remove();
+
+  updateGrid();
+  updateTimeMarkers();
+  updateStats();
+}
+
+function highlightStream(key) {
+  highlightedKey = key;
+  streamGroup.selectAll('.stream-path')
+    .classed('dimmed', d => d.key !== key)
+    .classed('highlighted', d => d.key === key);
+  document.querySelectorAll('.legend-item').forEach(el => el.classList.toggle('active', el.dataset.key === key));
+}
+
+function unhighlightAll() {
+  highlightedKey = null;
+  streamGroup.selectAll('.stream-path').classed('dimmed', false).classed('highlighted', false);
+  document.querySelectorAll('.legend-item').forEach(el => el.classList.remove('active'));
+}
+
+function fmtVal(v) {
+  const m = METRICS[activeMetric];
+  return ((activeMetric === 'units' || activeMetric === 'roster') ? Math.round(v) : v.toFixed(1)) + m.unit;
+}
+
+function showTooltip(key, event) {
+  const color = colorMap[key];
+  if (!color) return;
+
+  ttName.textContent = nameMap[key] || key;
+  ttName.style.color = color;
+  ttGroup.textContent = groupMap[key] || '';
+  ttGroup.style.color = color;
+
+  const recent = timeSeries[timeSeries.length - 1];
+  const cur = recent ? (recent[activeMetric][key] || 0) : 0;
+
+  const totalNow = recent ? keys.reduce((s, k) => s + ((recent[activeMetric][k]) || 0), 0) : 0;
+  const pctNow = totalNow > 0 ? (cur / totalNow * 100).toFixed(1) : '0.0';
+
+  if (activeLayout === 'proportion') {
+    ttCurrent.textContent = pctNow + '% (' + fmtVal(cur) + ')';
+  } else {
+    ttCurrent.textContent = fmtVal(cur);
+  }
+
+  const hr = timeSeries.slice(-120);
+  const avg = hr.reduce((s, b) => s + ((b[activeMetric][key]) || 0), 0) / hr.length;
+  if (activeLayout === 'proportion') {
+    const avgTotal = hr.reduce((s, b) => keys.reduce((ss, k) => ss + ((b[activeMetric][k]) || 0), 0), 0) / hr.length;
+    const avgPct = avgTotal > 0 ? (avg / avgTotal * 100).toFixed(1) : '0.0';
+    ttAvg.textContent = avgPct + '% (' + fmtVal(avg) + ')';
+  } else {
+    ttAvg.textContent = fmtVal(avg);
+  }
+
+  const peak = Math.max(...timeSeries.map(b => (b[activeMetric][key]) || 0));
+  ttPeak.textContent = fmtVal(peak);
+
+  ttPct.textContent = totalNow > 0 ? pctNow + '%' : '0%';
+
+  if (activeMetric !== 'roster' && recent && recent.roster) {
+    const rosterNow = recent.roster[key] || 0;
+    const unitsNow = recent.units ? (recent.units[key] || 0) : 0;
+    ttRosterLabel.style.display = '';
+    ttRoster.style.display = '';
+    ttRoster.textContent = Math.round(rosterNow) + ' affiliated'
+      + (activeMetric !== 'units' ? ' · ' + Math.round(unitsNow) + ' transmitting' : '');
+  } else {
+    ttRosterLabel.style.display = 'none';
+    ttRoster.style.display = 'none';
+  }
+
+  tooltipEl.classList.add('visible');
+  moveTooltip(event);
+}
+
+function moveTooltip(ev) {
+  let x = ev.clientX + 16, y = ev.clientY - 60;
+  if (x + 210 > window.innerWidth) x = ev.clientX - 210 - 16;
+  if (y < 10) y = 10;
+  tooltipEl.style.left = x + 'px'; tooltipEl.style.top = y + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('visible'); }
+
+function updateCrosshair(ev) {
+  const rect = svgEl.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  crosshairGroup.style('display', null);
+  crosshairLine.attr('x1', mx).attr('x2', mx).attr('y1', margin.top).attr('y2', height - margin.bottom);
+  const idx = Math.round(xScale.invert(mx));
+  const secs = (timeSeries.length - 1 - idx) * BUCKET_SEC;
+  const label = secs <= 0 ? 'now' : secs < 60 ? secs + 's ago' : secs < 3600 ? Math.floor(secs / 60) + 'm ago' : (secs / 3600).toFixed(1) + 'h ago';
+  crosshairLabel.attr('x', mx).attr('y', height - margin.bottom + 14).text(label);
+}
+function hideCrosshair() { crosshairGroup.style('display', 'none'); }
+
+const ttDetail = document.getElementById('tt-detail');
+const detailCache = new Map();
+let detailTimer = null;
+let detailLastKey = null;
+let detailAbort = null;
+
+function getBucketIdx(ev) {
+  const rect = svgEl.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  return Math.round(xScale.invert(mx));
+}
+
+function scheduleDetailFetch(ev, tgKey) {
+  const idx = getBucketIdx(ev);
+  const cacheKey = `${idx}:${tgKey}`;
+
+  if (cacheKey === detailLastKey) return;
+
+  clearTimeout(detailTimer);
+  detailTimer = setTimeout(() => {
+    detailLastKey = cacheKey;
+
+    if (detailCache.has(cacheKey)) {
+      renderDetail(detailCache.get(cacheKey));
+      return;
+    }
+
+    fetchBucketDetail(idx, tgKey, cacheKey);
+  }, 300);
+}
+
+async function fetchBucketDetail(idx, tgKey, cacheKey) {
+  ttDetail.style.display = '';
+  ttDetail.innerHTML = '<div class="tt-detail-loading">loading...</div>';
+
+  if (detailAbort) detailAbort.abort();
+  detailAbort = new AbortController();
+
+  const bucket = timeSeries[idx];
+  if (!bucket) return;
+
+  const startMs = bucket.time;
+  const endMs = startMs + BUCKET_SEC * 1000;
+  const startISO = new Date(startMs).toISOString();
+  const endISO = new Date(endMs).toISOString();
+
+  try {
+    const params = new URLSearchParams({
+      system_id: activeSystemId,
+      tgid: tgKey,
+      start_time: startISO,
+      end_time: endISO,
+      limit: '15',
+    });
+    const resp = await fetch(`${apiBase}/calls?${params}`, {
+      signal: detailAbort.signal,
+    });
+    if (!resp.ok) throw new Error(resp.status);
+    const data = await resp.json();
+
+    const calls = (data.calls || []).map(c => ({
+      start_time: c.start_time,
+      duration: c.duration,
+      emergency: c.emergency,
+      units: (c.src_list || []).map(s => s.tag || String(s.src)),
+    }));
+
+    detailCache.set(cacheKey, calls);
+
+    if (detailLastKey === cacheKey) {
+      renderDetail(calls);
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    ttDetail.innerHTML = '<div class="tt-detail-empty">fetch failed</div>';
+  }
+}
+
+function renderDetail(calls) {
+  ttDetail.style.display = '';
+  if (!calls.length) {
+    ttDetail.innerHTML = '<div class="tt-detail-empty">no calls in this window</div>';
+    return;
+  }
+
+  let html = `<div class="tt-detail-header">${calls.length} call${calls.length !== 1 ? 's' : ''} in bucket</div>`;
+  for (const c of calls) {
+    const t = new Date(c.start_time);
+    const time = t.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const dur = c.duration != null ? Math.round(c.duration) + 's' : '?';
+    const unitStr = c.units.length ? c.units.join(', ') : '';
+    const isEmg = c.emergency;
+    html += `<div class="tt-call-row${isEmg ? ' emergency' : ''}">`;
+    html += `<span class="tt-call-time">${time}</span>`;
+    html += `<span class="tt-call-dur">${dur}</span>`;
+    if (unitStr) html += `<span class="tt-call-units">${unitStr}</span>`;
+    if (isEmg) html += `<span class="tt-call-emg">EMG</span>`;
+    html += `</div>`;
+  }
+  ttDetail.innerHTML = html;
+}
+
+function clearDetail() {
+  clearTimeout(detailTimer);
+  if (detailAbort) detailAbort.abort();
+  detailLastKey = null;
+  ttDetail.style.display = 'none';
+  ttDetail.innerHTML = '';
+}
+
+function updateStats() {
+  const recent = timeSeries[timeSeries.length - 1];
+  if (recent) {
+    const total = keys.reduce((s, k) => s + ((recent[activeMetric][k]) || 0), 0);
+    statTotal.textContent = activeLayout === 'proportion'
+      ? '100%'
+      : ((activeMetric === 'units' || activeMetric === 'roster') ? Math.round(total) : total.toFixed(0));
+
+    if (recent.roster) {
+      const totalAffiliated = keys.reduce((s, k) => s + (recent.roster[k] || 0), 0);
+      statAffiliated.textContent = Math.round(totalAffiliated);
+    }
+  }
+  let peak = 0;
+  for (const b of timeSeries) {
+    const t = keys.reduce((s, k) => s + ((b[activeMetric][k]) || 0), 0);
+    if (t > peak) peak = t;
+  }
+  statPeakEl.textContent = activeLayout === 'proportion'
+    ? '100%'
+    : ((activeMetric === 'units' || activeMetric === 'roster') ? Math.round(peak) : peak.toFixed(0));
+}
+
+function updateDesc() {
+  metricDesc.textContent = METRICS[activeMetric].desc + ' · ' + LAYOUT_DESCS[activeLayout];
+}
+
+document.querySelectorAll('.metric-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeMetric = btn.dataset.metric;
+    document.querySelectorAll('.metric-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    updateDesc();
+    detailCache.clear();
+    streamGroup.selectAll('.stream-path').remove();
+    render();
+  });
+});
+
+document.querySelectorAll('.layout-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeLayout = btn.dataset.layout;
+    document.querySelectorAll('.layout-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    updateDesc();
+    streamGroup.selectAll('.stream-path').remove();
+    render();
+  });
+});
+
+function buildLegend() {
+  const legend = document.getElementById('legend');
+  legend.innerHTML = '';
+  for (const key of keys) {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.dataset.key = key;
+    const dot = document.createElement('div');
+    dot.className = 'legend-dot';
+    dot.style.background = colorMap[key];
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(nameMap[key] || key));
+    item.addEventListener('mouseenter', () => highlightStream(key));
+    item.addEventListener('mouseleave', () => unhighlightAll());
+    legend.appendChild(item);
+  }
+}
+
+const params = new URLSearchParams(window.location.search);
+const apiBase = params.get('api') || '/api/v1';
+const selectEl = document.getElementById('system-select');
+let activeSystemId = null;
+
+function startSystem(sysId) {
+  if (activeSystemId !== null) {
+    destroyData();
+    streamGroup.selectAll('.stream-path').remove();
+    timeSeries = [];
+    keys = [];
+    detailCache.clear();
+  }
+
+  activeSystemId = sysId;
+  updateDesc();
+  resize();
+
+  initData({
+    apiBase,
+    systemId: sysId,
+    onTalkgroups: (talkgroups) => {
+      setupTalkgroups(talkgroups);
+    },
+    onUpdate: (series, updatedKeys, updatedMap) => {
+      timeSeries = series;
+      talkgroupMap = updatedMap;
+      render();
+    },
+  }).catch(err => {
+    console.error('[signal-flow] Init failed:', err);
+    metricDesc.textContent = 'Connection failed: ' + err.message;
+  });
+}
+
+selectEl.addEventListener('change', () => {
+  const sysId = parseInt(selectEl.value, 10);
+  if (sysId && sysId !== activeSystemId) {
+    const url = new URL(window.location);
+    url.searchParams.set('system', sysId);
+    history.replaceState(null, '', url);
+    startSystem(sysId);
+  }
+});
+
+(async function boot() {
+  try {
+    const resp = await fetch(apiBase + '/systems');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    const systems = data.systems || [];
+
+    if (!systems.length) {
+      selectEl.innerHTML = '<option>No systems found</option>';
+      selectEl.disabled = true;
+      return;
+    }
+
+    systems.forEach(sys => {
+      const opt = document.createElement('option');
+      opt.value = sys.system_id;
+      opt.textContent = sys.name || ('System ' + sys.system_id);
+      selectEl.appendChild(opt);
+    });
+
+    const requested = parseInt(params.get('system'), 10);
+    const initial = systems.find(s => s.system_id === requested) ? requested : systems[0].system_id;
+    selectEl.value = initial;
+
+    window.addEventListener('resize', resize);
+    startSystem(initial);
+  } catch (err) {
+    console.error('[signal-flow] Boot failed:', err);
+    metricDesc.textContent = 'Failed to load systems: ' + err.message;
+  }
+})();
+</script>
+<script src="theme-engine.js?v=2"></script>
+</body>
+</html>
