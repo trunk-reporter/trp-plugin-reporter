@@ -2880,6 +2880,49 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /stats/baseline:
+    get:
+      operationId: getStatsBaseline
+      summary: Talkgroup activity against normal
+      description: |
+        Returns every talkgroup with calls in the trailing `window`, with how many calls the
+        same clock window held on each of the previous `days` days. Days without calls count
+        as zero in the mean.
+      tags: [stats]
+      parameters:
+        - name: window
+          in: query
+          description: Width of the window in seconds, ending now.
+          schema:
+            type: integer
+            minimum: 60
+            maximum: 86400
+            default: 600
+        - name: days
+          in: query
+          description: How many previous days to compare against.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 30
+            default: 7
+        - name: system_id
+          in: query
+          description: Filter by system ID(s), comma-separated. Alias "systems" also accepted.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BaselineResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /stats/call-volume:
     get:
       operationId: getCallVolume
@@ -6837,6 +6880,57 @@ components:
           description: Calls per time bucket, present when the request sets `interval`. Only buckets with calls are listed.
           items:
             $ref: "#/components/schemas/ActivityBucket"
+
+    BaselineResponse:
+      type: object
+      required: [window_seconds, days, now, talkgroups]
+      properties:
+        window_seconds:
+          type: integer
+          example: 600
+        days:
+          type: integer
+          example: 7
+        now:
+          type: string
+          format: date-time
+          description: The end of the current window
+          example: "2026-03-01T14:05:00.000Z"
+        talkgroups:
+          type: array
+          description: Talkgroups with calls in the current window, busiest first
+          items:
+            $ref: "#/components/schemas/BaselineEntry"
+
+    BaselineEntry:
+      type: object
+      required: [system_id, tgid, tg_alpha_tag, calls_now, baseline_mean, baseline_max, days_with_data]
+      properties:
+        system_id:
+          type: integer
+          example: 3
+        tgid:
+          type: integer
+          example: 9178
+        tg_alpha_tag:
+          type: string
+          example: "09-8L Main"
+        calls_now:
+          type: integer
+          description: Calls that started in the current window
+          example: 14
+        baseline_mean:
+          type: number
+          description: Mean calls in the same window over the previous days, counting days without calls as zero
+          example: 6.4
+        baseline_max:
+          type: integer
+          description: Most calls in the same window on any one of the previous days
+          example: 11
+        days_with_data:
+          type: integer
+          description: Previous days on which the window held any calls
+          example: 6
 
     ActivityBucket:
       type: object

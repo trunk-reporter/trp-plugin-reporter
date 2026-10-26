@@ -365,3 +365,55 @@ async fn first_heard_since_bounds_both_lists() {
     let (st, _) = get(&app, "/api/v1/first-heard?limit=100000").await;
     assert_eq!(st, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn baseline_compares_equal_windows_on_prior_days() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    let (sys1, now) = (s.sys1, s.now);
+    store
+        .write_sync(move |c| {
+            // tg 777: one call 5 minutes ago, two a day before that, one two days before; tg 778: two now, no history.
+            for (tg, ago) in [(777, 5 * MIN), (777, DAY + 5 * MIN), (777, DAY + 6 * MIN), (777, 2 * DAY + 5 * MIN), (778, 2 * MIN), (778, 3 * MIN)] {
+                c.execute("INSERT INTO calls (system_id, tgid, start_ms, state) VALUES (?1, ?2, ?3, 'concluded')", rusqlite::params![sys1.0, tg, now - ago])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let (st, v) = get(&app, "/api/v1/stats/baseline?window=900&days=7").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "BaselineResponse");
+    assert_eq!((v["window_seconds"].as_i64(), v["days"].as_i64()), (Some(900), Some(7)));
+    time::OffsetDateTime::parse(v["now"].as_str().unwrap(), &time::format_description::well_known::Rfc3339).unwrap();
+    // Busiest now first.
+    let tgs = v["talkgroups"].as_array().unwrap();
+    for t in tgs {
+        assert_schema(t, "BaselineEntry");
+    }
+    let by = |tg: i64| tgs.iter().find(|t| t["tgid"] == tg).unwrap();
+    assert_eq!(tgs[0]["tgid"], 778);
+    assert_eq!((by(778)["calls_now"].as_i64(), by(778)["baseline_mean"].as_f64(), by(778)["days_with_data"].as_i64()), (Some(2), Some(0.0), Some(0)));
+    assert_eq!((by(777)["calls_now"].as_i64(), by(777)["baseline_max"].as_i64(), by(777)["days_with_data"].as_i64()), (Some(1), Some(2), Some(2)));
+    assert!((by(777)["baseline_mean"].as_f64().unwrap() - 3.0 / 7.0).abs() < 1e-9);
+    assert_eq!(by(777)["tg_alpha_tag"], "");
+
+    // Defaults, and a system with nothing in the window.
+    let (st, v) = get(&app, "/api/v1/stats/baseline").await;
+    assert_eq!((st, v["window_seconds"].as_i64(), v["days"].as_i64()), (StatusCode::OK, Some(600), Some(7)));
+    let (_, v) = get(&app, &format!("/api/v1/stats/baseline?system_id={}", s.sys2.0)).await;
+    assert_eq!(v["talkgroups"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn baseline_bounds_are_400s() {
+    let (app, _, _, _) = app();
+    for q in ["window=59", "window=86401", "window=x", "days=0", "days=31", "days=x", "days=-1"] {
+        let (st, v) = get(&app, &format!("/api/v1/stats/baseline?{q}")).await;
+        assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")), "{q}");
+    }
+    for q in ["window=60&days=1", "window=86400&days=30"] {
+        let (st, _) = get(&app, &format!("/api/v1/stats/baseline?{q}")).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+    }
+}

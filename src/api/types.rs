@@ -12,7 +12,7 @@ use time::macros::format_description;
 use crate::affiliations::AffiliationEntry;
 use crate::store::calls::{CallRow, FrequencyRow, TransmissionRow, frequencies, transmissions, units_of};
 use crate::store::recorder::RecorderStateRow;
-use crate::store::stats::{ActivityBucketRow, ActivityRow, TalkgroupActivityRow};
+use crate::store::stats::{ActivityBucketRow, ActivityRow, BaselineRow, TalkgroupActivityRow};
 use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{ActiveTalkgroupRow, EncryptionStatRow, TalkgroupRow};
@@ -934,6 +934,41 @@ impl TalkgroupActivity {
 pub struct TalkgroupActivityResponse {
     pub activity: Vec<TalkgroupActivity>,
     pub total: usize,
+}
+
+/// The spec's `BaselineEntry`: a talkgroup's calls in the trailing window against the same window on previous days.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BaselineEntry {
+    pub system_id: i64,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub calls_now: i64,
+    pub baseline_mean: f64,
+    pub baseline_max: i64,
+    pub days_with_data: i64,
+}
+
+impl From<&BaselineRow> for BaselineEntry {
+    fn from(r: &BaselineRow) -> BaselineEntry {
+        BaselineEntry {
+            system_id: r.system_id.0,
+            tgid: r.tgid,
+            tg_alpha_tag: r.alpha_tag.clone(),
+            calls_now: r.calls_now,
+            baseline_mean: r.baseline_mean,
+            baseline_max: r.baseline_max,
+            days_with_data: r.days_with_data,
+        }
+    }
+}
+
+/// The spec's `BaselineResponse`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BaselineResponse {
+    pub window_seconds: u32,
+    pub days: u32,
+    pub now: String,
+    pub talkgroups: Vec<BaselineEntry>,
 }
 
 /// The spec's `StatsResponse`. `systems` counts sites ("total recording sites").

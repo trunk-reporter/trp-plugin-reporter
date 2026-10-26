@@ -7,12 +7,14 @@ use axum::extract::{Query as QueryParams, State};
 
 use super::talkgroups::{blocking, system_filter, systems};
 use super::types::{
-    ActivityBucket, DecodeRate, DecodeRatesResponse, FirstHeardResponse, Recorder, RecorderListResponse, StatsResponse, SystemActivity, Talkgroup,
-    TalkgroupActivity, TalkgroupActivityResponse, Unit,
+    ActivityBucket, BaselineEntry, BaselineResponse, DecodeRate, DecodeRatesResponse, FirstHeardResponse, Recorder, RecorderListResponse, StatsResponse,
+    SystemActivity, Talkgroup, TalkgroupActivity, TalkgroupActivityResponse, Unit,
 };
 use super::{ApiError, AppState, Query, ids, pagination, param, rfc3339, sort, time_param, time_range, window};
 use crate::store::recorder::{decode_rates, first_state_ms, latest_recorder_state};
-use crate::store::stats::{ActivityFilter, activity_buckets, activity_talkgroups, stats as stats_row, system_activity, talkgroup_activity as activity_rows};
+use crate::store::stats::{
+    ActivityFilter, activity_buckets, activity_talkgroups, baseline as baseline_rows, stats as stats_row, system_activity, talkgroup_activity as activity_rows,
+};
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{first_heard_talkgroups, tg_alpha_tag};
 use crate::store::units::first_heard_units;
@@ -171,6 +173,33 @@ pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): Q
             })
             .collect();
         Ok(TalkgroupActivityResponse { activity, total })
+    })
+    .await?;
+    Ok(Json(body))
+}
+
+/// An integer query parameter within `range`, or `default` when absent.
+fn bounded(q: &Query, name: &str, default: u32, range: std::ops::RangeInclusive<u32>) -> Result<u32, ApiError> {
+    match param(q, name) {
+        None => Ok(default),
+        Some(v) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| ApiError::InvalidParameter(format!("{name} must be {} to {}, not {v}", range.start(), range.end()))),
+    }
+}
+
+/// `GET /stats/baseline`: the talkgroups active in the trailing `window` seconds, each against the mean of the same
+/// window on the previous `days` days.
+pub async fn baseline(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<BaselineResponse>, ApiError> {
+    let now = now_ms();
+    let window_seconds = bounded(&q, "window", 600, 60..=86_400)?;
+    let days = bounded(&q, "days", 7, 1..=30)?;
+    let body = blocking(&state, move |c| {
+        let systems = systems(c)?;
+        let rows = baseline_rows(c, &system_filter(&q, &systems), now, window_seconds, days).map_err(StoreError::from)?;
+        Ok(BaselineResponse { window_seconds, days, now: rfc3339(now), talkgroups: rows.iter().map(BaselineEntry::from).collect() })
     })
     .await?;
     Ok(Json(body))

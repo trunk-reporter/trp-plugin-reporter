@@ -199,6 +199,57 @@ pub fn activity_buckets(conn: &Connection, f: &ActivityFilter, interval_s: u32) 
     Ok(out)
 }
 
+/// One talkgroup that is active now, against the same clock window on previous days.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BaselineRow {
+    pub system_id: SystemId,
+    pub tgid: u32,
+    pub alpha_tag: String,
+    /// Calls started in `[now - window, now)`.
+    pub calls_now: i64,
+    /// Mean calls in the same window over the previous `days` days; days without calls count as zero.
+    pub baseline_mean: f64,
+    pub baseline_max: i64,
+    /// How many of those days had any calls.
+    pub days_with_data: i64,
+}
+
+/// Every talkgroup with calls in `[now - window_s, now)` (empty `system_ids` is every system), busiest first (then by
+/// tgid, system), with its calls in each of the equally wide windows ending `d` days before `now`, `d = 1..=days`.
+pub fn baseline(conn: &Connection, system_ids: &[i64], now_ms: i64, window_s: u32, days: u32) -> rusqlite::Result<Vec<BaselineRow>> {
+    let systems = if system_ids.is_empty() {
+        String::new()
+    } else {
+        format!(" AND system_id IN ({})", system_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","))
+    };
+    let sql = format!(
+        "WITH RECURSIVE days(d) AS (SELECT 1 UNION ALL SELECT d + 1 FROM days WHERE d < :days), \
+              cur AS (SELECT system_id, tgid, COUNT(*) AS n FROM calls \
+                       WHERE start_ms >= :now - :window AND start_ms < :now{systems} GROUP BY system_id, tgid), \
+              per AS (SELECT cur.system_id, cur.tgid, cur.n AS now_n, \
+                             (SELECT COUNT(*) FROM calls c WHERE c.system_id = cur.system_id AND c.tgid = cur.tgid \
+                                 AND c.start_ms >= :now - days.d * 86400000 - :window AND c.start_ms < :now - days.d * 86400000) AS day_n \
+                        FROM cur, days) \
+         SELECT per.system_id, per.tgid, COALESCE(t.alpha_tag, ''), per.now_n, SUM(per.day_n) * 1.0 / :days, MAX(per.day_n), SUM(per.day_n > 0) \
+         FROM per LEFT JOIN talkgroups t ON t.system_id = per.system_id AND t.tgid = per.tgid \
+         GROUP BY per.system_id, per.tgid ORDER BY per.now_n DESC, per.tgid, per.system_id"
+    );
+    let window_ms = i64::from(window_s) * 1000;
+    conn.prepare_cached(&sql)?
+        .query_map(rusqlite::named_params! {":days": i64::from(days), ":now": now_ms, ":window": window_ms}, |r| {
+            Ok(BaselineRow {
+                system_id: r.get(0)?,
+                tgid: r.get(1)?,
+                alpha_tag: r.get(2)?,
+                calls_now: r.get(3)?,
+                baseline_mean: r.get(4)?,
+                baseline_max: r.get(5)?,
+                days_with_data: r.get(6)?,
+            })
+        })?
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +354,38 @@ mod tests {
         drop(s);
         let s = Store::open(&path).unwrap();
         assert_eq!(totals(&s), (10_000, 10_000));
+    }
+
+    #[test]
+    fn baseline_counts_equal_windows_on_prior_days() {
+        let s = Store::in_memory();
+        let now = 1_700_000_000_000_i64;
+        let (min, day) = (60_000_i64, 86_400_000_i64);
+        s.write_sync(move |c| {
+            ensure_system(c, "sys1", "p25", "", 1_000)?;
+            c.execute("INSERT INTO talkgroups (system_id, tgid, alpha_tag, first_heard_ms, last_heard_ms) VALUES (1, 7, 'Dispatch', 0, 0)", [])?;
+            // tg 7: one call now, two a day ago, one two days ago; tg 8: one now, no history;
+            // tg 9: only history (not listed); and tg 7 again exactly at `now`, outside the window.
+            for (tg, start) in [
+                (7, now - 5 * min),
+                (7, now - day - 5 * min),
+                (7, now - day - 6 * min),
+                (7, now - 2 * day - 5 * min),
+                (7, now),
+                (8, now - 2 * min),
+                (9, now - day - 5 * min),
+            ] {
+                c.execute("INSERT INTO calls (system_id, tgid, start_ms, state) VALUES (1, ?1, ?2, 'concluded')", rusqlite::params![tg, start])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let rows = s.read(|c| baseline(c, &[], now, 600, 7)).unwrap();
+        let got: Vec<_> = rows.iter().map(|r| (r.tgid, r.alpha_tag.as_str(), r.calls_now, r.baseline_mean, r.baseline_max, r.days_with_data)).collect();
+        assert_eq!(got, vec![(7, "Dispatch", 1, 3.0 / 7.0, 2, 2), (8, "", 1, 0.0, 0, 0)]);
+        // Fewer days, fewer windows: one day back sees only the two calls of day 1.
+        let rows = s.read(|c| baseline(c, &[1], now, 600, 1)).unwrap();
+        assert_eq!((rows[0].baseline_mean, rows[0].baseline_max, rows[0].days_with_data), (2.0, 2, 1));
+        assert!(s.read(|c| baseline(c, &[2], now, 600, 7)).unwrap().is_empty());
     }
 }

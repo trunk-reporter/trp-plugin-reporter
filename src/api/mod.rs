@@ -221,6 +221,7 @@ pub fn router(state: AppState) -> Router {
         .route("/stats", get(stats::stats))
         .route("/stats/rates", get(stats::rates))
         .route("/stats/talkgroup-activity", get(stats::talkgroup_activity))
+        .route("/stats/baseline", get(stats::baseline))
         .route("/recorders", get(stats::recorders))
         .route("/first-heard", get(stats::first_heard))
         .route("/events/stream", get(sse::stream))
