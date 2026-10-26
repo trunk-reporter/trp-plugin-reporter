@@ -81,10 +81,13 @@ design, is **several talkgroups on one shared timeline**.
 - **Token:** when the server has a token set, the app asks for it once, keeps it in the browser,
   sends it as a bearer header on fetches and as the `token` query parameter on the event stream
   and the audio socket, which the plugin already accepts. There is no login page on a plugin.
-- **Preferences on the server:** colour rules, favourites, monitored talkgroups, channel
-  priorities and mutes are stored by the server (`GET/PUT /preferences/{key}`, a JSON document per
-  key, no users on a plugin so one set per server), with the browser copy as a cache. A link
-  opened on another machine, and Wall mode on a second screen, see the same colours and channels.
+- **Where settings live:** things that describe the radio system are stored by the server and
+  look the same to everyone who opens it: talkgroup colour rules, favourites, monitored
+  talkgroups, channel priorities (`GET/PUT /preferences/{key}`, a JSON document per key; no users
+  on a plugin, so one set per server; the browser copy is a cache). Things that describe what one
+  person is doing on one screen stay in the browser: the selection (which is also in the URL),
+  mutes, volume, folded lanes, column choices. Wall mode on a second screen is the same URL opened
+  there, so it shows the same channels with no shared state.
 - **Tests:** Vitest for the API client, the selection logic and the timeline's layout maths;
   one Playwright smoke run against a real plugin store that opens every view at two data sizes
   (an empty store and the reference capture) and fails on console errors or blank panels.
@@ -102,7 +105,10 @@ the server the link points at:
 A talkgroup is keyed by the server's `system_id` and the talkgroup id. On a hub, a radio system
 heard at two installations is one system when its P25 system id matches (else by short name), the
 installation is a `recorder` attribute on its calls, and copies of one transmission heard at two
-installations are merged by the hub before they reach the API. The app never de-duplicates. (The
+installations are reduced to the best recording by the hub before they reach the API, by the
+same test TRP applies within one installation (a copy is dropped only when the kept one holds
+all of it, decoded at least as well) and the best-copy choice tr-engine's call queries already
+make. The app never de-duplicates. (The
 hub is specified separately; this is the contract the app assumes of it.) "Site" keeps its API
 meaning, an RF site of a system, and is never used for an installation.
 
@@ -302,9 +308,10 @@ Settled by the conversation, listed so they can be checked while reading:
   latter; change it if a better plain word exists.
 - The app lives in the tr-dashboard repository and the reporter embeds its build. My call.
 - Classic chart pages are not carried. My call, reversible per page.
-- One system across installations is keyed by P25 system id, and the hub merges duplicate
-  transmissions before the API. My call; the hub's own design will restate it.
-- Preferences live on the server. My call, from the owner's stated preference for durable
-  storage.
+- One system across installations is keyed by P25 system id, and the hub keeps the best
+  recording of a transmission heard at several. Settled with the owner; the hub's own design
+  restates the test.
+- Settings split: system-describing ones on the server, per-screen ones in the browser.
+  Settled with the owner.
 - The fates of the unmentioned tr-dashboard pages are in "What is kept"; Call groups is the one
   worth a second look.
