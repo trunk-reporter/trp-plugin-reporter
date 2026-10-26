@@ -24,14 +24,31 @@ It starts with the default settings below and needs no configuration.
 | Access token | none | Leave empty for no login. When set, clients send it as a bearer token. |
 | Keep history for (days) | 0 | 0 keeps everything. |
 | Backfill from recorded calls on start | on | See Backfill. |
+| Allowed origins | none | Web pages served from these origins may call the API. One origin per line, such as `http://192.168.1.20:8081`. |
 
 ## What you get
 
 - The API at `http://127.0.0.1:8092/api/v1/`, following tr-engine's
-  `openapi.yaml` for the endpoints in phase 1, including the live event stream
-  (SSE).
+  `openapi.yaml` for the endpoints built so far, including the live event
+  stream (SSE).
+- Added in 0.2.0: `/stats/talkgroup-activity`, `/talkgroups/active`,
+  `/units/{id}/talkgroups`, `/first-heard`, `/stats/baseline`,
+  `/preferences/{key}` and `/audio/live`.
 - The pages at `http://127.0.0.1:8092/`. The Website link on the plugin's card
   in TRP opens them.
+
+## Live audio
+
+Live audio is a WebSocket at `/api/v1/audio/live`. It sends PCM frames, framed
+as tr-engine frames them. It works in plugin mode only: serve mode has no
+recorder, so it answers 404. With an access token set, pass it as `?token=`
+because a browser cannot add a header to a WebSocket.
+
+## Preferences
+
+`GET` and `PUT /api/v1/preferences/{key}` keep one JSON document per key in the
+store, for the web app's settings. They are shared by everyone who can reach the
+server.
 
 ## Serve mode
 
@@ -58,10 +75,10 @@ recorded there, so the history begins with what you have. If it is interrupted
 it resumes where it stopped on the next start. Turn "Backfill from recorded
 calls on start" off to start with an empty history.
 
-## Not in phase 1
+## Not built yet
 
-Live audio, transcription, talkgroup directory import, trunking messages, call
-groups, the other statistics and analytics endpoints, and user accounts are not
+Transcription, talkgroup directory import, trunking messages, call groups, the
+other statistics and analytics endpoints, and user accounts are not
 implemented. Their endpoints answer 501 with the error code `not_implemented`.
 
 ## Working with Trunk Recorder Pro

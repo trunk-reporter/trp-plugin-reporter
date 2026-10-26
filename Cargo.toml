@@ -2,7 +2,7 @@
 # The plugin's id: it names the executable, the release files and the plugin's
 # entry in the registry.
 name = "trunk-reporter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Call, unit and talkgroup history with tr-engine's API and pages, stored in SQLite."
 license = "MIT"

@@ -1,5 +1,7 @@
 # tr-engine Rust plugin (phase 1) — implementation plan
 
+> Phase 2 is `docs/superpowers/plans/2026-10-25-trunk-reporter-phase-2-plan.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A Trunk Recorder Pro (TRP) plugin, in Rust, that stores every call, transmission, unit event and recorder status in SQLite and serves tr-engine's REST API, SSE stream and phase-1 pages on its own port, with no other software to run.
