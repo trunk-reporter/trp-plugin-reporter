@@ -3,6 +3,8 @@ mod common;
 use axum::http::{Method, StatusCode};
 use common::*;
 use serde_json::Value;
+use trunk_reporter::api::rfc3339;
+use trunk_reporter::store::units::{NewUnitEvent, insert_unit_event};
 
 fn tgids(v: &Value) -> Vec<(i64, i64)> {
     v["talkgroups"].as_array().unwrap().iter().map(|t| (t["system_id"].as_i64().unwrap(), t["tgid"].as_i64().unwrap())).collect()
@@ -75,6 +77,37 @@ async fn plain_ids_are_ambiguous_across_systems() {
     assert_eq!(st, StatusCode::BAD_REQUEST);
     let (st, _) = request(&app, Method::PATCH, "/api/v1/talkgroups/101").await;
     assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn a_talkgroups_units_say_when_each_was_first_heard_there() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    // Unit 10 joined talkgroup 101 two hours ago, before its first call there (10 minutes ago);
+    // unit 20 was first heard there by a call three days ago (calls keep whole seconds).
+    let (sys, site, at) = (s.sys1, s.site1, s.now - 2 * HOUR);
+    store
+        .write_sync(move |c| {
+            let e = NewUnitEvent {
+                system_id: sys,
+                site_id: Some(site),
+                unit: 10,
+                event_type: "join",
+                time_ms: at,
+                tgid: Some(101),
+                emergency: false,
+                call_id: None,
+                metadata_json: None,
+            };
+            insert_unit_event(c, &e).map(|_| ())
+        })
+        .unwrap();
+
+    let (st, v) = get(&app, "/api/v1/talkgroups/101/units?window=20").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "UnitListResponse");
+    let seen: Vec<(i64, &str)> = v["units"].as_array().unwrap().iter().map(|u| (u["unit_id"].as_i64().unwrap(), u["first_seen"].as_str().unwrap())).collect();
+    assert_eq!(seen, vec![(10, rfc3339(s.now - 2 * HOUR).as_str()), (20, rfc3339((s.now - 3 * DAY) / 1000 * 1000).as_str())]);
 }
 
 #[tokio::test]

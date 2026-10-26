@@ -139,12 +139,14 @@ pub async fn units(State(state): State<AppState>, Path(id): Path<String>, QueryP
         let systems = systems(c)?;
         let units = rows
             .iter()
-            .map(|(u, calls)| {
+            .map(|(u, calls, first_here)| {
                 let tag = match u.last_event_tgid {
                     Some(t) => tg_alpha_tag(c, u.system_id, t).map_err(StoreError::from)?,
                     None => None,
                 };
-                Ok(Unit::from_rows(u, systems.get(&u.system_id.0), tag, Some(*calls)))
+                let mut unit = Unit::from_rows(u, systems.get(&u.system_id.0), tag, Some(*calls));
+                unit.first_seen = rfc3339(*first_here);
+                Ok(unit)
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
         Ok(UnitListResponse { units, total, limit, offset })

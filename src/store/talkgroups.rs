@@ -302,9 +302,13 @@ pub fn list_talkgroups(conn: &Connection, f: &TalkgroupFilter, now_ms: i64) -> r
     Ok((rows, total))
 }
 
+/// A unit on a talkgroup: its row, its calls there in the window, and when it was first heard there (ms).
+pub type TalkgroupUnit = (UnitRow, i64, i64);
+
 /// Units with a transmission on a call of the talkgroup since `since_ms` (with the number of such
 /// calls), and units with an event on it (0 calls when they have no transmission), most active first.
-/// Only units the `units` table knows are listed.
+/// Each comes with when it was first heard there: the earlier of its first event and first transmission
+/// on the talkgroup. Only units the `units` table knows are listed.
 pub fn units_on_talkgroup(
     conn: &Connection,
     system_id: SystemId,
@@ -312,7 +316,7 @@ pub fn units_on_talkgroup(
     since_ms: i64,
     limit: u32,
     offset: u32,
-) -> rusqlite::Result<(Vec<(UnitRow, i64)>, i64)> {
+) -> rusqlite::Result<(Vec<TalkgroupUnit>, i64)> {
     const ACTIVE: &str = "WITH tx AS (\
             SELECT t.unit AS unit, COUNT(DISTINCT c.id) AS n FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
             WHERE c.system_id = ?1 AND c.tgid = ?2 AND c.start_ms >= ?3 GROUP BY t.unit), \
@@ -327,11 +331,11 @@ pub fn units_on_talkgroup(
     )?;
     let cols = UNIT_COLS.split(", ").map(|c| format!("u.{c}")).collect::<Vec<_>>().join(", ");
     let sql = format!(
-        "{ACTIVE} SELECT {cols}, active.n FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit ORDER BY active.n DESC, u.unit_id LIMIT ?4 OFFSET ?5"
+        "{ACTIVE} SELECT {cols}, active.n,          MIN(COALESCE((SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id), u.first_seen_ms),              COALESCE((SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id), u.first_seen_ms)) AS first_here          FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit ORDER BY active.n DESC, u.unit_id LIMIT ?4 OFFSET ?5"
     );
     let rows = conn
         .prepare(&sql)?
-        .query_map((system_id, tgid, since_ms, limit, offset), |r| Ok((unit_row(r)?, r.get::<_, i64>(11)?)))?
+        .query_map((system_id, tgid, since_ms, limit, offset), |r| Ok((unit_row(r)?, r.get::<_, i64>(11)?, r.get::<_, i64>(12)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok((rows, total))
 }
@@ -604,7 +608,7 @@ pub(crate) mod tests {
         .unwrap();
         let (rows, total) = s.read(|c| units_on_talkgroup(c, sys, 101, 1_000, 10, 0)).unwrap();
         assert_eq!(total, 3);
-        assert_eq!(rows.iter().map(|(u, n)| (u.unit_id, *n)).collect::<Vec<_>>(), [(10, 2), (11, 1), (12, 0)]);
+        assert_eq!(rows.iter().map(|(u, n, _)| (u.unit_id, *n)).collect::<Vec<_>>(), [(10, 2), (11, 1), (12, 0)]);
         assert_eq!(s.read(|c| units_on_talkgroup(c, sys, 101, 1_000, 1, 1)).unwrap().0[0].0.unit_id, 11);
         let stats = s.read(|c| encryption_stats(c, 1_000, &[sys.0])).unwrap();
         assert_eq!(stats.len(), 2);
