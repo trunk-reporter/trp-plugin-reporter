@@ -84,30 +84,53 @@ async fn a_talkgroups_units_say_when_each_was_first_heard_there() {
     let (app, store, _, _) = app();
     let s = seed(&store);
     // Unit 10 joined talkgroup 101 two hours ago, before its first call there (10 minutes ago);
-    // unit 20 was first heard there by a call three days ago (calls keep whole seconds).
-    let (sys, site, at) = (s.sys1, s.site1, s.now - 2 * HOUR);
+    // unit 20 was first heard there by a call three days ago; unit 99, first seen ten days ago
+    // elsewhere, has only an event here, 15 minutes ago.
+    let (sys, site, now) = (s.sys1, s.site1, s.now);
     store
         .write_sync(move |c| {
-            let e = NewUnitEvent {
+            let e = |unit, time_ms| NewUnitEvent {
                 system_id: sys,
                 site_id: Some(site),
-                unit: 10,
+                unit,
                 event_type: "join",
-                time_ms: at,
+                time_ms,
                 tgid: Some(101),
                 emergency: false,
                 call_id: None,
                 metadata_json: None,
             };
-            insert_unit_event(c, &e).map(|_| ())
+            trunk_reporter::store::units::touch_unit(c, sys, 99, "", "", now - 10 * DAY, None)?;
+            insert_unit_event(c, &e(10, now - 2 * HOUR))?;
+            insert_unit_event(c, &e(99, now - 15 * MIN)).map(|_| ())
         })
         .unwrap();
 
     let (st, v) = get(&app, "/api/v1/talkgroups/101/units?window=20").await;
     assert_eq!(st, StatusCode::OK);
     assert_schema(&v, "UnitListResponse");
-    let seen: Vec<(i64, &str)> = v["units"].as_array().unwrap().iter().map(|u| (u["unit_id"].as_i64().unwrap(), u["first_seen"].as_str().unwrap())).collect();
-    assert_eq!(seen, vec![(10, rfc3339(s.now - 2 * HOUR).as_str()), (20, rfc3339((s.now - 3 * DAY) / 1000 * 1000).as_str())]);
+    let seen: Vec<(i64, &str, &str)> = v["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| (u["unit_id"].as_i64().unwrap(), u["first_seen_on_talkgroup"].as_str().unwrap(), u["first_seen"].as_str().unwrap()))
+        .collect();
+    let at = |ms: i64| rfc3339(ms);
+    let expected = [
+        (10, at(now - 2 * HOUR), at(now - 40 * DAY)),
+        (20, at((now - 3 * DAY) / 1000 * 1000), at((now - 3 * DAY) / 1000 * 1000)),
+        (99, at(now - 15 * MIN), at(now - 10 * DAY)),
+    ];
+    let mut got = seen.clone();
+    got.sort();
+    let mut want: Vec<(i64, &str, &str)> = expected.iter().map(|(u, a, b)| (*u, a.as_str(), b.as_str())).collect();
+    want.sort();
+    // first_seen stays the unit's global first sighting (to the second for unit 20's call).
+    assert_eq!(got.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>(), want.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>());
+    for (id, _, global) in &got {
+        let w = want.iter().find(|w| w.0 == *id).unwrap();
+        assert!(global.starts_with(&w.2[..19]), "unit {id}: {global}");
+    }
 }
 
 #[tokio::test]

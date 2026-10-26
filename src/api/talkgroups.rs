@@ -145,7 +145,7 @@ pub async fn units(State(state): State<AppState>, Path(id): Path<String>, QueryP
                     None => None,
                 };
                 let mut unit = Unit::from_rows(u, systems.get(&u.system_id.0), tag, Some(*calls));
-                unit.first_seen = rfc3339(*first_here);
+                unit.first_seen_on_talkgroup = Some(rfc3339(*first_here));
                 Ok(unit)
             })
             .collect::<Result<Vec<_>, ApiError>>()?;

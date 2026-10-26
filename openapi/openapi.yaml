@@ -4821,7 +4821,10 @@ components:
         first_seen:
           type: string
           format: date-time
-          description: When the unit was first heard; on /talkgroups/{id}/units, when it was first heard on that talkgroup
+        first_seen_on_talkgroup:
+          type: string
+          format: date-time
+          description: When the unit was first heard on the talkgroup (only on /talkgroups/{id}/units)
           example: "2026-10-25T14:03:11.000Z"
         last_seen:
           type: string

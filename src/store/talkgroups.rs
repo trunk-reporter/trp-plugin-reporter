@@ -352,7 +352,7 @@ pub fn units_on_talkgroup(
     )?;
     let cols = UNIT_COLS.split(", ").map(|c| format!("u.{c}")).collect::<Vec<_>>().join(", ");
     let sql = format!(
-        "{ACTIVE} SELECT {cols}, active.n,          MIN(COALESCE((SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id), u.first_seen_ms),              COALESCE((SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id), u.first_seen_ms)) AS first_here          FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit ORDER BY active.n DESC, u.unit_id LIMIT ?4 OFFSET ?5"
+        "{ACTIVE} SELECT {cols}, active.n,          COALESCE(MIN(             (SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id),              (SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id)),              (SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id),              (SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id),              u.first_seen_ms) AS first_here          FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit ORDER BY active.n DESC, u.unit_id LIMIT ?4 OFFSET ?5"
     );
     let rows = conn
         .prepare(&sql)?

@@ -346,6 +346,9 @@ pub struct Unit {
     pub call_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relevance_score: Option<i64>,
+    /// When the unit was first heard on the talkgroup; only on `/talkgroups/{id}/units`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen_on_talkgroup: Option<String>,
 }
 
 impl Unit {
@@ -369,6 +372,7 @@ impl Unit {
             ota_alpha_tag: Some(row.ota_alpha_tag.clone()).filter(|t| !t.is_empty()),
             call_count,
             relevance_score: None,
+            first_seen_on_talkgroup: None,
         }
     }
 }
