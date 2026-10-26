@@ -81,8 +81,20 @@ pub struct ActivityFilter {
     pub tgids: Vec<u32>,
     pub after_ms: i64,
     pub before_ms: i64,
-    /// A `calls.state` to match; `None` counts every state.
-    pub state: Option<String>,
+    /// Which states of call to count.
+    pub state: CallStates,
+}
+
+/// The `calls.state` values a filter counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CallStates {
+    /// Every call.
+    #[default]
+    Any,
+    /// Every call that is no longer recording: `ended` (followed but not recorded, encrypted among them) and `concluded`.
+    Finished,
+    /// One `calls.state`.
+    Is(String),
 }
 
 /// One talkgroup's calls in a window. Names are empty when the talkgroup has no row.
@@ -114,6 +126,8 @@ pub struct ActivityBucketRow {
 }
 
 /// The `WHERE` text for a filter. The ids are numbers, so they are written in; the rest is bound.
+/// The state test is written `+c.state` so that SQLite never picks `calls_state` (every finished call in the
+/// store) over the window's `calls_start` / `calls_tg_start`.
 fn activity_where(f: &ActivityFilter) -> String {
     fn list<T: std::fmt::Display>(column: &str, v: &[T]) -> String {
         if v.is_empty() { String::new() } else { format!(" AND c.{column} IN ({})", v.iter().map(T::to_string).collect::<Vec<_>>().join(",")) }
@@ -123,13 +137,17 @@ fn activity_where(f: &ActivityFilter) -> String {
         list("system_id", &f.system_ids),
         list("site_id", &f.site_ids),
         list("tgid", &f.tgids),
-        if f.state.is_some() { " AND c.state = :state" } else { "" }
+        match f.state {
+            CallStates::Any => "",
+            CallStates::Finished => " AND +c.state <> 'recording'",
+            CallStates::Is(_) => " AND +c.state = :state",
+        }
     )
 }
 
 fn activity_params<'a>(f: &'a ActivityFilter, interval_ms: Option<&'a i64>) -> Vec<(&'static str, &'a dyn rusqlite::ToSql)> {
     let mut p: Vec<(&'static str, &dyn rusqlite::ToSql)> = vec![(":after", &f.after_ms), (":before", &f.before_ms)];
-    if let Some(s) = &f.state {
+    if let CallStates::Is(s) = &f.state {
         p.push((":state", s));
     }
     if let Some(i) = interval_ms {
@@ -140,22 +158,9 @@ fn activity_params<'a>(f: &'a ActivityFilter, interval_ms: Option<&'a i64>) -> V
 
 const DURATION_S: &str = "(COALESCE(c.end_ms, c.start_ms) - c.start_ms) / 1000.0";
 
-/// How many talkgroups have calls in the window.
-pub fn activity_talkgroups(conn: &Connection, f: &ActivityFilter) -> rusqlite::Result<i64> {
-    let sql = format!("SELECT COUNT(*) FROM (SELECT DISTINCT c.system_id, c.tgid FROM calls c WHERE {})", activity_where(f));
-    conn.query_row(&sql, activity_params(f, None).as_slice(), |r| r.get(0))
-}
-
 /// One row per `(system, talkgroup)` with calls in the window, busiest first (then by tgid, system).
 pub fn talkgroup_activity(conn: &Connection, f: &ActivityFilter) -> rusqlite::Result<Vec<TalkgroupActivityRow>> {
-    let sql = format!(
-        "SELECT c.system_id, c.tgid, COALESCE(t.alpha_tag, ''), COALESCE(t.description, ''), COALESCE(t.tag, ''), COALESCE(t.\"group\", ''), \
-                COUNT(*) AS n, SUM({DURATION_S}), SUM(c.emergency <> 0), MIN(c.start_ms), MAX(c.start_ms) \
-         FROM calls c LEFT JOIN talkgroups t ON t.system_id = c.system_id AND t.tgid = c.tgid \
-         WHERE {} GROUP BY c.system_id, c.tgid ORDER BY n DESC, c.tgid, c.system_id",
-        activity_where(f)
-    );
-    conn.prepare(&sql)?
+    conn.prepare(&talkgroup_activity_sql(f))?
         .query_map(activity_params(f, None).as_slice(), |r| {
             let (call_count, total_duration): (i64, f64) = (r.get(6)?, r.get(7)?);
             Ok(TalkgroupActivityRow {
@@ -176,17 +181,31 @@ pub fn talkgroup_activity(conn: &Connection, f: &ActivityFilter) -> rusqlite::Re
         .collect()
 }
 
-/// Per `(system, tgid)`, the non-empty buckets of `interval_s` seconds, aligned to the epoch:
-/// a call is in the bucket its start falls in. Ordered by system, tgid, time.
-pub fn activity_buckets(conn: &Connection, f: &ActivityFilter, interval_s: u32) -> rusqlite::Result<Vec<(i64, u32, Vec<ActivityBucketRow>)>> {
-    let interval_ms = i64::from(interval_s.max(1)) * 1000;
-    let sql = format!(
-        "SELECT c.system_id, c.tgid, (c.start_ms / :interval) * :interval AS b, COUNT(*), SUM({DURATION_S}) \
-         FROM calls c WHERE {} GROUP BY c.system_id, c.tgid, b ORDER BY c.system_id, c.tgid, b",
+fn talkgroup_activity_sql(f: &ActivityFilter) -> String {
+    format!(
+        "SELECT c.system_id, c.tgid, COALESCE(t.alpha_tag, ''), COALESCE(t.description, ''), COALESCE(t.tag, ''), COALESCE(t.\"group\", ''), \
+                COUNT(*) AS n, SUM({DURATION_S}), SUM(c.emergency <> 0), MIN(c.start_ms), MAX(c.start_ms) \
+         FROM calls c LEFT JOIN talkgroups t ON t.system_id = c.system_id AND t.tgid = c.tgid \
+         WHERE {} GROUP BY c.system_id, c.tgid ORDER BY n DESC, c.tgid, c.system_id",
         activity_where(f)
-    );
+    )
+}
+
+/// For the talkgroups `talkgroups` names (`(system id, tgid)`; a page of [`talkgroup_activity`]), the non-empty
+/// buckets of `interval_s` seconds, aligned to the epoch: a call is in the bucket its start falls in. Ordered by
+/// system, tgid, time; talkgroups without a call in the window are left out.
+pub fn activity_buckets(
+    conn: &Connection,
+    f: &ActivityFilter,
+    interval_s: u32,
+    talkgroups: &[(i64, u32)],
+) -> rusqlite::Result<Vec<(i64, u32, Vec<ActivityBucketRow>)>> {
     let mut out: Vec<(i64, u32, Vec<ActivityBucketRow>)> = Vec::new();
-    let mut stmt = conn.prepare(&sql)?;
+    if talkgroups.is_empty() {
+        return Ok(out);
+    }
+    let interval_ms = i64::from(interval_s.max(1)) * 1000;
+    let mut stmt = conn.prepare(&activity_buckets_sql(f, talkgroups))?;
     let mut rows = stmt.query(activity_params(f, Some(&interval_ms)).as_slice())?;
     while let Some(r) = rows.next()? {
         let (system, tgid): (i64, u32) = (r.get(0)?, r.get(1)?);
@@ -197,6 +216,17 @@ pub fn activity_buckets(conn: &Connection, f: &ActivityFilter, interval_s: u32) 
         }
     }
     Ok(out)
+}
+
+/// The buckets query, for a non-empty `talkgroups`. The pairs are numbers, so they are written in.
+fn activity_buckets_sql(f: &ActivityFilter, talkgroups: &[(i64, u32)]) -> String {
+    let pairs = talkgroups.iter().map(|(s, t)| format!("({s},{t})")).collect::<Vec<_>>().join(",");
+    format!(
+        "SELECT c.system_id, c.tgid, (c.start_ms / :interval) * :interval AS b, COUNT(*), SUM({DURATION_S}) \
+         FROM calls c WHERE {} AND (c.system_id, c.tgid) IN (VALUES {pairs}) \
+         GROUP BY c.system_id, c.tgid, b ORDER BY c.system_id, c.tgid, b",
+        activity_where(f)
+    )
 }
 
 /// One talkgroup that is active now, against the same clock window on previous days.
@@ -325,11 +355,12 @@ mod tests {
         })
         .unwrap();
         let f = ActivityFilter { after_ms: base, before_ms: base + 600_000, ..Default::default() };
-        let b = s.read(|c| activity_buckets(c, &f, 60)).unwrap();
+        let both = [(1, 7), (1, 8)];
+        let b = s.read(|c| activity_buckets(c, &f, 60, &both)).unwrap();
         let b7 = vec![ActivityBucketRow { start_ms: base, calls: 2, seconds: 6.0 }, ActivityBucketRow { start_ms: base + 180_000, calls: 1, seconds: 0.0 }];
         assert_eq!(b, vec![(1, 7, b7), (1, 8, vec![ActivityBucketRow { start_ms: base, calls: 1, seconds: 1.0 }])]);
         // 10 s buckets split the first two calls; every start is a multiple of the interval.
-        let b = s.read(|c| activity_buckets(c, &f, 10)).unwrap();
+        let b = s.read(|c| activity_buckets(c, &f, 10, &both)).unwrap();
         assert_eq!(b[0].2.iter().map(|x| (x.start_ms - base, x.calls)).collect::<Vec<_>>(), vec![(0, 1), (50_000, 1), (180_000, 1)]);
         assert!(b.iter().flat_map(|t| &t.2).all(|x| x.start_ms % 10_000 == 0));
         // The summary agrees with the buckets; the window is half open.
@@ -337,7 +368,60 @@ mod tests {
         assert_eq!(rows.iter().map(|r| (r.tgid, r.call_count, r.emergency_count)).collect::<Vec<_>>(), vec![(7, 3, 0), (8, 1, 1)]);
         assert_eq!((rows[0].total_duration, rows[0].avg_duration, rows[0].first_call_ms, rows[0].last_call_ms), (6.0, 2.0, base + 5_000, base + 180_000));
         assert_eq!(rows[0].alpha_tag, "");
-        assert_eq!(s.read(|c| activity_talkgroups(c, &f)).unwrap(), 2);
+        // Only the talkgroups asked for get buckets; one with no call in the window gets none.
+        let b = s.read(|c| activity_buckets(c, &f, 60, &[(1, 8), (1, 9)])).unwrap();
+        assert_eq!(b, vec![(1, 8, vec![ActivityBucketRow { start_ms: base, calls: 1, seconds: 1.0 }])]);
+        assert!(s.read(|c| activity_buckets(c, &f, 60, &[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn finished_calls_are_ended_or_concluded() {
+        let s = Store::in_memory();
+        s.write_sync(|c| {
+            ensure_system(c, "sys1", "p25", "", 1_000)?;
+            // tg 7: concluded; tg 8: ended (encrypted, not recorded); tg 9: still recording.
+            for (tg, state, enc) in [(7, "concluded", 0), (8, "ended", 1), (9, "recording", 0)] {
+                c.execute("INSERT INTO calls (system_id, tgid, start_ms, encrypted, state) VALUES (1, ?1, 5000, ?3, ?2)", rusqlite::params![tg, state, enc])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let tgs = |state: CallStates| {
+            let f = ActivityFilter { after_ms: 0, before_ms: 10_000, state, ..Default::default() };
+            s.read(|c| talkgroup_activity(c, &f)).unwrap().iter().map(|r| r.tgid).collect::<Vec<_>>()
+        };
+        assert_eq!(tgs(CallStates::Finished), vec![7, 8]);
+        assert_eq!(tgs(CallStates::Any), vec![7, 8, 9]);
+        assert_eq!(tgs(CallStates::Is("ended".into())), vec![8]);
+    }
+
+    #[test]
+    fn activity_is_found_through_the_window_not_the_state() {
+        let s = Store::in_memory();
+        for state in [CallStates::Finished, CallStates::Is("ended".into())] {
+            for f in [
+                ActivityFilter { state: state.clone(), ..Default::default() },
+                ActivityFilter { system_ids: vec![1], tgids: vec![101], state: state.clone(), ..Default::default() },
+            ] {
+                let summary = s.read(|c| Ok(plan_named(c, &talkgroup_activity_sql(&f), &activity_params(&f, None)))).unwrap();
+                let buckets = s.read(|c| Ok(plan_named(c, &activity_buckets_sql(&f, &[(1, 101), (1, 202)]), &activity_params(&f, Some(&60_000))))).unwrap();
+                for plan in [summary, buckets] {
+                    assert!(plan.contains("calls_start") || plan.contains("calls_tg_start"), "{plan}");
+                    assert!(!plan.contains("calls_state"), "{plan}");
+                }
+            }
+        }
+    }
+
+    /// The plan of a query with named parameters, all its lines joined.
+    fn plan_named(c: &rusqlite::Connection, sql: &str, params: &[(&str, &dyn rusqlite::ToSql)]) -> String {
+        c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
     }
 
     #[test]

@@ -2845,12 +2845,23 @@ paths:
           description: |
             Filter by call state. Defaults to `COMPLETED` (only finished calls).
             Set to a specific state to filter, or pass an empty string to include all states.
+
+            This server maps the values onto the states it stores: `COMPLETED` is every call that is
+            no longer recording, recorded or not (an encrypted call that was followed but never
+            recorded is finished, and counts); `STOPPED` is only the finished calls that were never
+            recorded; an empty value is every call, those still recording among them.
           schema:
             type: string
             default: COMPLETED
         - name: interval
           in: query
-          description: Bucket size in seconds; when given, each item carries `buckets` (non-empty buckets only, aligned to the epoch).
+          description: |
+            Bucket size in seconds; when given, each item carries `buckets` (non-empty buckets only, aligned to the epoch).
+
+            Buckets are computed for the returned page only. An answer may hold at most 10 000 buckets,
+            counted as the page's talkgroups (`min(limit, total - offset)`) times `ceil(window / interval)`;
+            a request over that, or one whose window alone needs more than 10 000 buckets of the interval,
+            is a 400.
           schema:
             type: integer
             enum: [10, 30, 60, 300, 900, 3600]

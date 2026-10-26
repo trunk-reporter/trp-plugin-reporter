@@ -13,7 +13,7 @@ use super::types::{
 use super::{ApiError, AppState, Query, ids, pagination, param, rfc3339, sort, time_param, time_range, window};
 use crate::store::recorder::{decode_rates, first_state_ms, latest_recorder_state};
 use crate::store::stats::{
-    ActivityFilter, activity_buckets, activity_talkgroups, baseline as baseline_rows, stats as stats_row, system_activity, talkgroup_activity as activity_rows,
+    ActivityFilter, CallStates, activity_buckets, baseline as baseline_rows, stats as stats_row, system_activity, talkgroup_activity as activity_rows,
 };
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{first_heard_talkgroups, tg_alpha_tag};
@@ -25,7 +25,8 @@ const MAX_RATES: u32 = 10_000;
 
 /// The bucket sizes `/stats/talkgroup-activity` offers, in seconds.
 const INTERVALS: [u32; 6] = [10, 30, 60, 300, 900, 3600];
-/// The most buckets one `/stats/talkgroup-activity` answer may hold: talkgroups times the window's length in intervals.
+/// The most buckets one `/stats/talkgroup-activity` answer may hold: the page's talkgroups times the window's length
+/// in intervals.
 const MAX_BUCKETS: i64 = 10_000;
 const DAY_MS: i64 = 86_400_000;
 
@@ -108,20 +109,28 @@ fn interval(q: &Query) -> Result<Option<u32>, ApiError> {
         .ok_or_else(|| ApiError::InvalidParameter(format!("interval must be one of 10, 30, 60, 300, 900, 3600 (seconds), not {v}")))
 }
 
-/// `call_state` as `calls.state` holds it: `COMPLETED` (the default) is a concluded call, an empty value is any state.
-fn call_state(q: &Query) -> Option<String> {
+/// `call_state` as `calls.state` holds it: `COMPLETED` (the default) is a finished call, whether recorded
+/// (`concluded`) or not (`ended`, as an encrypted call stays); `STOPPED` is `ended`; an empty value is any state.
+fn call_state(q: &Query) -> CallStates {
     match q.get("call_state").map(|v| v.trim().to_ascii_lowercase()) {
-        None => Some("concluded".into()),
-        Some(v) if v.is_empty() => None,
-        Some(v) => Some(
-            match v.as_str() {
-                "completed" => "concluded",
-                "stopped" => "ended",
-                other => other,
-            }
-            .to_string(),
-        ),
+        None => CallStates::Finished,
+        Some(v) if v.is_empty() => CallStates::Any,
+        Some(v) => match v.as_str() {
+            "completed" => CallStates::Finished,
+            "stopped" => CallStates::Is("ended".into()),
+            other => CallStates::Is(other.to_string()),
+        },
     }
+}
+
+/// Refuses an answer of more than [`MAX_BUCKETS`] buckets.
+fn bucket_cap(buckets: i64) -> Result<(), ApiError> {
+    if buckets > MAX_BUCKETS {
+        return Err(ApiError::InvalidParameter(format!(
+            "too many buckets: {buckets}, at most {MAX_BUCKETS}; widen interval, narrow the window or lower limit"
+        )));
+    }
+    Ok(())
 }
 
 pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<TalkgroupActivityResponse>, ApiError> {
@@ -130,6 +139,14 @@ pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): Q
     let interval = interval(&q)?;
     let (limit, offset) = pagination(&q)?;
     let (field, _) = sort(&q, "calls", &["calls", "duration", "tgid"])?;
+    // Buckets per talkgroup; too many for even one talkgroup is refused before the store is asked.
+    let per_talkgroup = interval.map(|i| {
+        let interval_ms = i64::from(i) * 1000;
+        (before_ms - after_ms + interval_ms - 1) / interval_ms
+    });
+    if let Some(n) = per_talkgroup {
+        bucket_cap(n)?;
+    }
     let body = blocking(&state, move |c| {
         let systems = systems(c)?;
         let filter = ActivityFilter {
@@ -140,14 +157,6 @@ pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): Q
             before_ms,
             state: call_state(&q),
         };
-        if let Some(interval) = interval {
-            let interval_ms = i64::from(interval) * 1000;
-            let per_talkgroup = (before_ms - after_ms + interval_ms - 1) / interval_ms;
-            let buckets = activity_talkgroups(c, &filter).map_err(StoreError::from)?.saturating_mul(per_talkgroup);
-            if buckets > MAX_BUCKETS {
-                return Err(ApiError::InvalidParameter(format!("too many buckets: {buckets}, at most {MAX_BUCKETS}; widen interval or narrow the window")));
-            }
-        }
         let mut rows = activity_rows(c, &filter).map_err(StoreError::from)?;
         match field.as_str() {
             "duration" => rows.sort_by(|a, b| b.total_duration.total_cmp(&a.total_duration).then(a.tgid.cmp(&b.tgid)).then(a.system_id.0.cmp(&b.system_id.0))),
@@ -155,14 +164,19 @@ pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): Q
             _ => {}
         }
         let total = rows.len();
-        let mut by_talkgroup: HashMap<(i64, u32), _> = match interval {
-            Some(i) => activity_buckets(c, &filter, i).map_err(StoreError::from)?.into_iter().map(|(s, t, b)| ((s, t), b)).collect(),
-            None => HashMap::new(),
+        let start = (offset as usize).min(total);
+        let page = &rows[start..total.min(start.saturating_add(limit as usize))];
+        // The page's talkgroups only, and only as many buckets as the cap allows.
+        let mut by_talkgroup: HashMap<(i64, u32), _> = match (interval, per_talkgroup) {
+            (Some(i), Some(n)) => {
+                bucket_cap((page.len() as i64).saturating_mul(n))?;
+                let keys: Vec<(i64, u32)> = page.iter().map(|r| (r.system_id.0, r.tgid)).collect();
+                activity_buckets(c, &filter, i, &keys).map_err(StoreError::from)?.into_iter().map(|(s, t, b)| ((s, t), b)).collect()
+            }
+            _ => HashMap::new(),
         };
-        let activity = rows
+        let activity = page
             .iter()
-            .skip(offset as usize)
-            .take(limit as usize)
             .map(|r| {
                 let mut a = TalkgroupActivity::from_rows(r, systems.get(&r.system_id.0));
                 if interval.is_some() {

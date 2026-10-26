@@ -182,10 +182,18 @@ async fn talkgroup_activity_summarises_the_window() {
     let (app, store, _, _) = app();
     let s = seed(&store);
     unnamed_talkgroup_calls(&store, &s);
+    // A call on 555 still recording a minute ago: not finished, so not counted by default.
+    let (sys1, now) = (s.sys1, s.now);
+    store
+        .write_sync(move |c| {
+            c.execute("INSERT INTO calls (system_id, call_num, tgid, start_ms, state) VALUES (?1, 77, 555, ?2, 'recording')", (sys1, now - MIN)).map(|_| ())
+        })
+        .unwrap();
 
     let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity").await;
     assert_eq!(st, StatusCode::OK);
-    // The last 24 h, completed calls: c1, c2 (tg 101), c3 (tg 202; c4 is stopped, not completed) and two on 555.
+    // The last 24 h, finished calls: c1, c2 (tg 101), c3 and c4 (tg 202; c4 is encrypted, ended and never
+    // recorded, and still counts) and two on 555.
     let items = v["activity"].as_array().unwrap();
     assert_eq!(v["total"], 3);
     for i in items {
@@ -201,10 +209,10 @@ async fn talkgroup_activity_summarises_the_window() {
             i["emergency_count"].as_i64().unwrap(),
         )
     };
-    // By call count, then tgid: 101 and 555 tie on 2.
+    // By call count, then tgid: all three tie on 2.
     assert_eq!(row(&items[0]), (101, "Fire Disp".into(), 2, 20.0, 1));
-    assert_eq!(row(&items[1]), (555, "".into(), 2, 8.0, 0));
-    assert_eq!(row(&items[2]), (202, "PD Tac".into(), 1, 20.0, 0));
+    assert_eq!(row(&items[1]), (202, "PD Tac".into(), 2, 25.0, 0));
+    assert_eq!(row(&items[2]), (555, "".into(), 2, 8.0, 0));
     assert_eq!((items[0]["system_id"].as_i64(), items[0]["system_name"].as_str()), (Some(s.sys1.0), Some("ohmarcs")));
     assert_eq!(
         (items[0]["tg_group"].as_str(), items[0]["tg_tag"].as_str(), items[0]["tg_description"].as_str()),
@@ -213,10 +221,16 @@ async fn talkgroup_activity_summarises_the_window() {
     assert_eq!(items[0]["first_call"], rfc3339(s.now - 30 * MIN));
     assert_eq!(items[0]["last_call"], rfc3339(s.now - 10 * MIN));
 
-    // Every state, and a wider window: c4 and c5 join.
+    // Every state: the recording call joins. COMPLETED is the default; STOPPED is the calls that were never recorded.
+    let tgs = |v: &Value| -> Vec<(i64, i64)> {
+        v["activity"].as_array().unwrap().iter().map(|i| (i["tgid"].as_i64().unwrap(), i["call_count"].as_i64().unwrap())).collect()
+    };
     let (_, v) = get(&app, "/api/v1/stats/talkgroup-activity?call_state=&sort=tgid").await;
-    let tgs: Vec<(i64, i64)> = v["activity"].as_array().unwrap().iter().map(|i| (i["tgid"].as_i64().unwrap(), i["call_count"].as_i64().unwrap())).collect();
-    assert_eq!(tgs, vec![(101, 2), (202, 2), (555, 2)]);
+    assert_eq!(tgs(&v), vec![(101, 2), (202, 2), (555, 3)]);
+    let (_, v) = get(&app, "/api/v1/stats/talkgroup-activity?call_state=COMPLETED&sort=tgid").await;
+    assert_eq!(tgs(&v), vec![(101, 2), (202, 2), (555, 2)]);
+    let (_, v) = get(&app, "/api/v1/stats/talkgroup-activity?call_state=STOPPED").await;
+    assert_eq!(tgs(&v), vec![(202, 1)]);
     let after = rfc3339(s.now - 4 * DAY);
     let (_, v) = get(&app, &format!("/api/v1/stats/talkgroup-activity?after={after}&tgids=101&limit=1")).await;
     assert_eq!((v["total"].as_i64(), v["activity"][0]["call_count"].as_i64()), (Some(1), Some(3)));
@@ -263,10 +277,11 @@ async fn talkgroup_activity_buckets_by_interval() {
 async fn too_many_buckets_is_a_400() {
     let (app, store, _, _) = app();
     let s = seed(&store);
+    // More than the cap for a single talkgroup is refused whatever the page.
     let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity?after=2020-01-01T00:00:00Z&interval=10").await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")));
     assert!(v["error"].as_str().unwrap().contains("at most 10000"), "{v}");
-    // The cap is talkgroups x ceil(window / interval), with explicit times so the clock does not matter.
+    // The cap is the page's talkgroups x ceil(window / interval), with explicit times so the clock does not matter.
     // One talkgroup (101), 10 s buckets: a window of exactly 10 000 buckets passes, one ms more is 10 001.
     let after = s.now - HOUR;
     let url = |tgids: &str, len_ms: i64| {
@@ -277,14 +292,51 @@ async fn too_many_buckets_is_a_400() {
     let (st, v) = get(&app, &url("101", 100_000_001)).await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")));
     assert!(v["error"].as_str().unwrap().contains("too many buckets: 10001,"), "{v}");
-    // Two talkgroups (101 and 202, heard in the last 4 h): 5 000 buckets each is the limit.
+    // Two talkgroups (101 and 202, heard in the last 4 h) on one page: 5 000 buckets each is the limit.
     let after = s.now - 4 * HOUR;
-    let url = |len_ms: i64| format!("/api/v1/stats/talkgroup-activity?interval=10&tgids=101,202&after={}&before={}", rfc3339(after), rfc3339(after + len_ms));
-    let (st, _) = get(&app, &url(50_000_000)).await;
+    let url = |len_ms: i64, page: &str| {
+        format!("/api/v1/stats/talkgroup-activity?interval=10&tgids=101,202&after={}&before={}{page}", rfc3339(after), rfc3339(after + len_ms))
+    };
+    let (st, _) = get(&app, &url(50_000_000, "")).await;
     assert_eq!(st, StatusCode::OK);
-    let (st, v) = get(&app, &url(50_000_001)).await;
+    let (st, v) = get(&app, &url(50_000_001, "")).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(v["error"].as_str().unwrap().contains("too many buckets: 10002,"), "{v}");
+    // A page of one of them holds 5 001 and passes, whether it is the first or the second; past the end is empty.
+    for page in ["&limit=1", "&offset=1", "&offset=2"] {
+        let (st, v) = get(&app, &url(50_000_001, page)).await;
+        assert_eq!((st, v["total"].as_i64()), (StatusCode::OK, Some(2)), "{page}");
+        assert_eq!(v["activity"].as_array().unwrap().len(), if page == "&offset=2" { 0 } else { 1 }, "{page}");
+    }
+}
+
+#[tokio::test]
+async fn buckets_are_for_the_page_only() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    // 180 more talkgroups with a call in the last hour: 180 x 60 one-minute buckets would be 10 800.
+    let (sys1, now) = (s.sys1, s.now);
+    store
+        .write_sync(move |c| {
+            for tg in 1_000..1_180 {
+                c.execute(
+                    "INSERT INTO calls (system_id, call_num, tgid, start_ms, end_ms, state) VALUES (?1, ?2, ?2, ?3, ?3 + 2000, 'concluded')",
+                    (sys1, tg, now - 20 * MIN - tg),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let url = format!("/api/v1/stats/talkgroup-activity?interval=60&limit=20&after={}&before={}", rfc3339(now - HOUR), rfc3339(now));
+    let (st, v) = get(&app, &url).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let items = v["activity"].as_array().unwrap();
+    assert_eq!((items.len(), v["total"].as_i64()), (20, Some(181)), "180 and tg 101");
+    for i in items {
+        assert_schema(i, "TalkgroupActivity");
+        let calls: i64 = i["buckets"].as_array().unwrap().iter().map(|b| b["calls"].as_i64().unwrap()).sum();
+        assert_eq!(calls, i["call_count"].as_i64().unwrap(), "{i}");
+    }
 }
 
 #[tokio::test]
