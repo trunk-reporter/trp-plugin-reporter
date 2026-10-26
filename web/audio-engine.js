@@ -645,7 +645,7 @@ class AudioEngine {
     var panner = this.audioCtx.createStereoPanner();
 
     var gain = this.audioCtx.createGain();
-    gain.gain.value = 0; // starts muted; setMute(key, false) enables
+    gain.gain.value = 1.0; // plays by default; a page mutes with setMute(key, true)
 
     // Load persisted settings
     var savedVol = this._loadSetting('vol_' + key);
@@ -669,7 +669,7 @@ class AudioEngine {
       panner: panner,
       gain: gain,
       compressorEnabled: compEnabled,
-      muted: true,
+      muted: false,
       lastActivity: Date.now(),
       tgid: tgid,
       systemId: systemId || 0,
@@ -687,9 +687,12 @@ class AudioEngine {
 
     this.tgNodes.set(key, nodeEntry);
 
-    // Pan: deterministic position from tgid (assigned on unmute via setMute).
-    // For manual pan, restore saved position now.
-    if (!this._autoPan && savedPan !== null) {
+    // Pan: a deterministic position from the tgid when auto-pan is on,
+    // else the saved manual position.
+    if (this._autoPan) {
+      panner.pan.value = this._panForKey(key);
+      nodeEntry._panAssigned = true;
+    } else if (savedPan !== null) {
       panner.pan.value = savedPan;
     }
 

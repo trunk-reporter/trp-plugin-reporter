@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+- OmniTrunker plays every talkgroup until you mute it; before, every talkgroup
+  started muted and the page was silent until each was picked by hand. Muted
+  talkgroups are the ones saved now (the old "selected" list is dropped), the
+  speaker shows a red box when muted and a padlock when the call is encrypted,
+  and the header counts the muted ones.
+- The shared audio engine starts a new talkgroup at full volume with its stereo
+  position assigned. Pages that mute on their own (the scanner) are unchanged.
+
 ## [0.2.0]
 
 Phase 2: what the web pages need beyond phase 1.

@@ -373,7 +373,17 @@
     transition: color 0.15s, opacity 0.15s;
   }
   .spk-btn:hover { color: var(--accent); }
-  .spk-btn.muted { opacity: 0.35; }
+  .spk-btn { position: relative; border-radius: 4px; }
+  .spk-btn.muted {
+    background: color-mix(in srgb, var(--danger) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 55%, transparent);
+  }
+  .spk-btn.encrypted::after {
+    content: '\1F512';
+    position: absolute; right: -5px; bottom: -4px;
+    font-size: 9px; line-height: 1;
+    filter: drop-shadow(0 0 1px var(--bg-tile));
+  }
 
   /* ── Pan Indicator ── */
   .pan-indicator {
@@ -884,10 +894,10 @@
       <div class="settings-group-title">Talkgroup Selection</div>
       <input type="text" class="tg-search" id="tg-search" placeholder="Search by TGID or alpha tag...">
       <div class="tg-actions">
-        <button id="tg-select-all">Select All</button>
-        <button id="tg-select-none">Select None</button>
+        <button id="tg-select-all">Unmute all</button>
+        <button id="tg-select-none">Mute all</button>
       </div>
-      <div class="tg-count" id="tg-count">0 selected</div>
+      <div class="tg-count" id="tg-count">all playing</div>
       <div class="tg-list" id="tg-list"></div>
     </div>
     <div class="settings-group">
@@ -1306,6 +1316,11 @@ function updateChannelsEmptyState() {
   channelsEmpty.style.display = count === 0 ? '' : 'none';
 }
 
+function speakerTitle(muted, encrypted) {
+  if (encrypted) return muted ? 'Encrypted, no audio. Muted.' : 'Encrypted, no audio';
+  return muted ? 'Muted. Click to unmute' : 'Playing. Click to mute';
+}
+
 function buildChannelCells(d, entry) {
   // Build cells using DOM methods for XSS safety
   const freq = d.freq ? (d.freq / 1e6).toFixed(4) : '';
@@ -1324,6 +1339,8 @@ function buildChannelCells(d, entry) {
     var isMuted = window._omniAudio && window._omniAudio.isMuted(d.tgid);
     spk.textContent = isMuted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
     if (isMuted) spk.classList.add('muted');
+    if (encrypted) spk.classList.add('encrypted');
+    spk.title = speakerTitle(isMuted, encrypted);
     spk.addEventListener('click', function(e) {
       e.stopPropagation();
       if (window._omniAudio) window._omniAudio.toggleMute(d.tgid);
@@ -1637,7 +1654,9 @@ function renderChannelRow(entry) {
   if (spk && d.tgid != null) {
     var isMuted = window._omniAudio && window._omniAudio.isMuted(d.tgid);
     spk.textContent = isMuted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
-    if (isMuted) spk.classList.add('muted'); else spk.classList.remove('muted');
+    spk.classList.toggle('muted', !!isMuted);
+    spk.classList.toggle('encrypted', encrypted);
+    spk.title = speakerTitle(isMuted, encrypted);
   }
   // col 1 (pan) - no update needed
   // col 2 (system) - rarely changes
@@ -2095,14 +2114,23 @@ setInterval(function() {
 
   let engine = null;
   let listening = false;
-  const selectedTGs = new Set(); // stores "sysId:tgid" composite keys; selected TGs play audio
-  var _pendingLegacyTgids = null; // plain tgid strings awaiting migration to composite keys
-  // Helper: check if any system's version of a tgid is selected
+  // Every talkgroup plays unless it is in here ("sysId:tgid" composite keys).
+  const mutedTGs = new Set();
+  // A tgid is audible unless every system's version of it is muted.
   function isTGSelected(tgid) {
-    for (var key of selectedTGs) {
-      if (key === tgid || String(key).split(':')[1] === String(tgid)) return true;
+    var seen = false;
+    for (var pair of tgCache) {
+      var key = pair[0];
+      if (String(key).split(':')[1] !== String(tgid)) continue;
+      seen = true;
+      if (!mutedTGs.has(key)) return true;
     }
-    return false;
+    if (seen) return false;
+    // Not in the directory yet: muted only if some key for it was saved as muted.
+    for (var k of mutedTGs) {
+      if (String(k).split(':')[1] === String(tgid)) return false;
+    }
+    return true;
   }
 
   // Settings drawer refs
@@ -2124,13 +2152,8 @@ setInterval(function() {
     try {
       var saved = JSON.parse(localStorage.getItem('omni-settings') || '{}');
       if (saved.volume != null) { masterVol.value = saved.volume; setVolumeEl.value = saved.volume; }
-      if (Array.isArray(saved.selected)) {
-        saved.selected.forEach(function(t) { selectedTGs.add(t); });
-        // Migrate legacy plain tgid entries to composite keys once systems are known
-        var legacyTgids = saved.selected.filter(function(t) { return String(t).indexOf(':') === -1; });
-        if (legacyTgids.length > 0) {
-          _pendingLegacyTgids = new Set(legacyTgids.map(String));
-        }
+      if (Array.isArray(saved.muted)) {
+        saved.muted.forEach(function(t) { mutedTGs.add(String(t)); });
       }
       if (saved.autoPan === false) autoPanToggle.checked = false;
       if (saved.bufferSize) { bufferSizeSelect.value = saved.bufferSize; setBufferSizeEl.value = saved.bufferSize; }
@@ -2162,7 +2185,7 @@ setInterval(function() {
       var pct = panelsC && panelT ? (panelT.offsetHeight / panelsC.offsetHeight * 100).toFixed(1) : null;
       var obj = {
         volume: parseInt(masterVol.value),
-        selected: Array.from(selectedTGs),
+        muted: Array.from(mutedTGs),
         autoPan: autoPanToggle.checked,
         bufferSize: bufferSizeSelect.value,
         hiddenColumns: getHiddenColumns(),
@@ -2274,7 +2297,7 @@ setInterval(function() {
   }
 
   function updateTGCount() {
-    tgCountEl.textContent = selectedTGs.size + ' selected';
+    tgCountEl.textContent = mutedTGs.size === 0 ? 'all playing' : mutedTGs.size + ' muted';
   }
   updateTGCount();
 
@@ -2298,8 +2321,8 @@ setInterval(function() {
     });
 
     engine.on('tg_created', function(ev) {
-      // Selection model: mute everything not in selectedTGs (composite key)
-      engine.setMute(ev.key, !selectedTGs.has(ev.key));
+      // Everything plays unless the user muted it (composite key)
+      engine.setMute(ev.key, mutedTGs.has(ev.key));
       // Audio channel rows disabled — SSE call_start handles row creation
       highlightAudioTG(ev.tgid, true);
     });
@@ -2389,8 +2412,8 @@ setInterval(function() {
       for (var pair of tgCache) {
         var compositeKey = pair[0];
         if (parseInt(compositeKey.split(':')[1]) === tgid) {
-          if (wasSelected) selectedTGs.delete(compositeKey);
-          else selectedTGs.add(compositeKey);
+          if (wasSelected) mutedTGs.add(compositeKey);
+          else mutedTGs.delete(compositeKey);
           if (engine) engine.setMute(compositeKey, wasSelected);
         }
       }
@@ -2459,13 +2482,12 @@ setInterval(function() {
 
       // Status text (skip if unchanged)
       if (tgActivity) {
-        var selCount = selectedTGs.size;
+        var mutedCount = mutedTGs.size;
+        var mutedNote = mutedCount > 0 ? ' (' + mutedCount + ' muted)' : '';
         if (voiceCount > 0) {
-          setAudioStatus(voiceCount + ' active (' + selCount + ' selected)', 'streaming');
-        } else if (selCount > 0) {
-          setAudioStatus('idle (' + selCount + ' selected)', '');
+          setAudioStatus(voiceCount + ' active' + mutedNote, 'streaming');
         } else {
-          setAudioStatus('idle (none selected)', '');
+          setAudioStatus('idle' + mutedNote, '');
         }
       }
     });
@@ -2524,20 +2546,6 @@ setInterval(function() {
       bySystem.get(sysId).push({ sysId: sysId, tgid: tgid, alpha_tag: meta.alpha_tag || '', group: meta.group || '' });
     }
 
-    // Migrate legacy plain tgid selections to composite keys
-    if (_pendingLegacyTgids && bySystem.size > 0) {
-      bySystem.forEach(function(tgs, sysId) {
-        for (var i = 0; i < tgs.length; i++) {
-          if (_pendingLegacyTgids.has(String(tgs[i].tgid))) {
-            selectedTGs.add(sysId + ':' + tgs[i].tgid);
-          }
-        }
-      });
-      // Remove the old plain entries
-      _pendingLegacyTgids.forEach(function(t) { selectedTGs.delete(t); });
-      _pendingLegacyTgids = null;
-      saveSettings();
-    }
 
     // Sort systems and TGs
     var sortedSystems = Array.from(bySystem.keys()).sort(function(a, b) { return a - b; });
@@ -2564,7 +2572,7 @@ setInterval(function() {
 
         var cb = document.createElement('input');
         cb.type = 'checkbox';
-        cb.checked = selectedTGs.has(compositeKey);
+        cb.checked = !mutedTGs.has(compositeKey);
         item.appendChild(cb);
 
         var tgidSpan = document.createElement('span');
@@ -2581,18 +2589,18 @@ setInterval(function() {
         (function(key, tgid, checkbox) {
           item.addEventListener('click', function(e) {
             if (e.target === checkbox) {
-              if (checkbox.checked) selectedTGs.add(key);
-              else selectedTGs.delete(key);
+              if (checkbox.checked) mutedTGs.delete(key);
+              else mutedTGs.add(key);
             } else {
-              if (selectedTGs.has(key)) {
-                selectedTGs.delete(key);
-                checkbox.checked = false;
-              } else {
-                selectedTGs.add(key);
+              if (mutedTGs.has(key)) {
+                mutedTGs.delete(key);
                 checkbox.checked = true;
+              } else {
+                mutedTGs.add(key);
+                checkbox.checked = false;
               }
             }
-            if (engine) engine.setMute(key, !selectedTGs.has(key));
+            if (engine) engine.setMute(key, mutedTGs.has(key));
             saveSelectedState();
             updateSpeakerIcon(tgid);
           });
@@ -2627,7 +2635,7 @@ setInterval(function() {
     for (var i = 0; i < items.length; i++) {
       var key = items[i].dataset.key;
       var cb = items[i].querySelector('input[type="checkbox"]');
-      if (cb) cb.checked = selectedTGs.has(key);
+      if (cb) cb.checked = !mutedTGs.has(key);
     }
   }
 
@@ -2638,21 +2646,21 @@ setInterval(function() {
 
   // Select All / None
   tgSelectAllBtn.addEventListener('click', function() {
-    for (var pair of tgCache) {
-      selectedTGs.add(pair[0]);
-      if (engine) engine.setMute(pair[0], false);
+    var prev = Array.from(mutedTGs);
+    mutedTGs.clear();
+    for (var i = 0; i < prev.length; i++) {
+      if (engine) engine.setMute(prev[i], false);
+      updateSpeakerIcon(parseInt(String(prev[i]).split(':').pop()));
     }
     saveSelectedState();
     renderTGList(tgSearchInput.value.trim());
   });
 
   tgSelectNoneBtn.addEventListener('click', function() {
-    var prev = Array.from(selectedTGs);
-    selectedTGs.clear();
-    for (var i = 0; i < prev.length; i++) {
-      if (engine) engine.setMute(prev[i], true);
-      var tgid = parseInt(String(prev[i]).split(':').pop());
-      updateSpeakerIcon(tgid);
+    for (var pair of tgCache) {
+      mutedTGs.add(pair[0]);
+      if (engine) engine.setMute(pair[0], true);
+      updateSpeakerIcon(parseInt(String(pair[0]).split(':').pop()));
     }
     saveSelectedState();
     renderTGList(tgSearchInput.value.trim());
