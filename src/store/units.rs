@@ -421,6 +421,41 @@ pub fn affiliation_events_since(conn: &Connection, since_ms: i64) -> rusqlite::R
         .collect()
 }
 
+/// One talkgroup a unit talked on in a window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnitTalkgroupRow {
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub calls: i64,
+    pub transmissions: i64,
+    pub seconds: f64,
+    pub first_ms: i64,
+    pub last_ms: i64,
+}
+
+/// The talkgroups `unit` talked on in `[after_ms, before_ms)` (by the transmission's own time), most transmissions first, then by tgid.
+pub fn talkgroups_of_unit(conn: &Connection, system_id: SystemId, unit: u32, after_ms: i64, before_ms: i64) -> rusqlite::Result<Vec<UnitTalkgroupRow>> {
+    conn.prepare_cached(
+        "SELECT c.tgid, COALESCE(t.alpha_tag, ''), COUNT(DISTINCT c.id), COUNT(*) AS n, SUM(x.len_s), MIN(x.time_ms), MAX(x.time_ms)
+         FROM call_transmissions x JOIN calls c ON c.id = x.call_id
+         LEFT JOIN talkgroups t ON t.system_id = c.system_id AND t.tgid = c.tgid
+         WHERE x.unit = :unit AND x.time_ms >= :after AND x.time_ms < :before AND c.system_id = :system
+         GROUP BY c.tgid ORDER BY n DESC, c.tgid",
+    )?
+    .query_map(named_params! { ":unit": unit, ":after": after_ms, ":before": before_ms, ":system": system_id }, |r| {
+        Ok(UnitTalkgroupRow {
+            tgid: r.get(0)?,
+            tg_alpha_tag: r.get(1)?,
+            calls: r.get(2)?,
+            transmissions: r.get(3)?,
+            seconds: r.get(4)?,
+            first_ms: r.get(5)?,
+            last_ms: r.get(6)?,
+        })
+    })?
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

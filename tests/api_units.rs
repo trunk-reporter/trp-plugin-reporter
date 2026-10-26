@@ -170,3 +170,65 @@ async fn unit_ids_are_ambiguous_too() {
         assert_schema(&v, "Unit");
     }
 }
+
+#[tokio::test]
+async fn a_units_talkgroups_in_a_window_come_from_its_transmissions() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    // Medic 10 keys up a second time on 101 in the call from 10 minutes ago.
+    let (extra_ms, c1) = (s.now - 9 * 60_000, s.calls[0].0);
+    store
+        .write_sync(move |c| {
+            c.execute(
+                "INSERT INTO call_transmissions (call_id, position, unit, time_ms, pos_s, len_s) VALUES (?1, 9, 10, ?2, 0, 4.0)",
+                rusqlite::params![c1, extra_ms],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let url = |after: i64, before: i64| format!("/api/v1/units/10/talkgroups?after={}&before={}", rfc3339(after), rfc3339(before));
+    let rows = |v: &Value| -> Vec<(i64, i64, i64)> {
+        v["talkgroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["tgid"].as_i64().unwrap(), t["calls"].as_i64().unwrap(), t["transmissions"].as_i64().unwrap()))
+            .collect()
+    };
+
+    // The last four hours: the call from 40 days ago is outside; 101 has two transmissions in one call.
+    let (st, v) = get(&app, &url(s.now - 4 * 3_600_000, s.now + 1_000)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "UnitTalkgroupListResponse");
+    assert_eq!((v["unit_id"].as_i64(), v["system_id"].as_i64()), (Some(10), Some(s.sys1.0)));
+    assert_eq!(rows(&v), vec![(101, 1, 2), (202, 1, 1)]);
+    let t = &v["talkgroups"][0];
+    assert_schema(t, "UnitTalkgroup");
+    assert_eq!(t["tg_alpha_tag"], "Fire Disp");
+    assert_eq!(t["seconds"].as_f64(), Some(10.0));
+    assert_eq!(t["last_time"].as_str(), Some(rfc3339(extra_ms).as_str()));
+    assert!(t["first_time"].as_str().unwrap() < t["last_time"].as_str().unwrap());
+
+    // Half open: ending at the later transmission leaves it out.
+    let (_, v) = get(&app, &url(s.now - 4 * 3_600_000, extra_ms)).await;
+    assert_eq!(rows(&v), vec![(101, 1, 1), (202, 1, 1)]);
+
+    // A wide window takes in the old call; ties on transmissions go by tgid.
+    let (_, v) = get(&app, &url(s.now - 60 * 86_400_000, s.now + 1_000)).await;
+    assert_eq!(rows(&v), vec![(101, 1, 2), (202, 2, 2)]);
+
+    // The composite id, the default window (24 h), and an inverted window.
+    let (_, v) = get(&app, &format!("/api/v1/units/{}:10/talkgroups", s.sys1.0)).await;
+    assert_eq!(rows(&v), vec![(101, 1, 2), (202, 1, 1)]);
+    let (st, _) = get(&app, &url(s.now, s.now - 1)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_unknown_unit_is_a_404_for_talkgroups() {
+    let (app, store, _, _) = app();
+    seed(&store);
+    let (st, v) = get(&app, "/api/v1/units/999999/talkgroups").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_schema(&v, "Error");
+}

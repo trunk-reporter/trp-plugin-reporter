@@ -5,11 +5,14 @@ use axum::extract::{Path, Query as QueryParams, State};
 use rusqlite::Connection;
 
 use super::talkgroups::{Systems, blocking, system_filter, systems};
-use super::types::{Affiliation, AffiliationListResponse, AffiliationSummary, Unit, UnitEvent, UnitEventListResponse, UnitListResponse};
-use super::{ApiError, AppState, Query, composite, flag, ids, pagination, sort, time_range};
+use super::types::{
+    Affiliation, AffiliationListResponse, AffiliationSummary, Unit, UnitEvent, UnitEventListResponse, UnitListResponse, UnitTalkgroup,
+    UnitTalkgroupListResponse,
+};
+use super::{ApiError, AppState, Query, composite, flag, ids, pagination, sort, time_range, window};
 use crate::affiliations::AffiliationFilter;
 use crate::store::talkgroups::tg_alpha_tag;
-use crate::store::units::{EventSort, UnitEventFilter, UnitFilter, UnitRow, UnitSort, list_unit_events, list_units, unit, units_by_id};
+use crate::store::units::{EventSort, UnitEventFilter, UnitFilter, UnitRow, UnitSort, list_unit_events, list_units, talkgroups_of_unit, unit, units_by_id};
 use crate::store::{StoreError, SystemId, now_ms};
 
 const SECOND_MS: i64 = 1000;
@@ -142,6 +145,23 @@ pub async fn events(
         };
         let (rows, total) = list_unit_events(c, &filter).map_err(StoreError::from)?;
         Ok(UnitEventListResponse { events: rows.iter().map(|r| UnitEvent::from_row(r, &instance)).collect(), total, limit, offset })
+    })
+    .await?;
+    Ok(Json(body))
+}
+
+/// `/units/{id}/talkgroups`: the talkgroups a unit talked on in `[after, before)` (default: the last 24 hours).
+pub async fn talkgroups(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    QueryParams(q): QueryParams<Query>,
+) -> Result<Json<UnitTalkgroupListResponse>, ApiError> {
+    let now = now_ms();
+    let (after, before) = window(&q, now - 24 * HOUR_MS, now)?;
+    let body = blocking(&state, move |c| {
+        let row = resolve_unit(c, &id)?;
+        let rows = talkgroups_of_unit(c, row.system_id, row.unit_id, after, before).map_err(StoreError::from)?;
+        Ok(UnitTalkgroupListResponse { unit_id: row.unit_id, system_id: row.system_id.0, talkgroups: rows.iter().map(UnitTalkgroup::from_row).collect() })
     })
     .await?;
     Ok(Json(body))

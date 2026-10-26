@@ -214,6 +214,7 @@ pub fn router(state: AppState) -> Router {
         .route("/units/{id}", get(units::one).patch(not_implemented))
         .route("/units/{id}/events", get(units::events))
         .route("/units/{id}/calls", get(calls::unit_calls))
+        .route("/units/{id}/talkgroups", get(units::talkgroups))
         .route("/unit-events", get(units::unit_events))
         .route("/unit-affiliations", get(units::affiliations))
         .route("/stats", get(stats::stats))

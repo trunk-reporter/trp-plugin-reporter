@@ -1483,6 +1483,46 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /units/{id}/talkgroups:
+    get:
+      operationId: listUnitTalkgroups
+      summary: Talkgroups a unit talked on
+      description: |
+        Returns the talkgroups a specific unit talked on in `[after, before)`,
+        counted from the unit's transmissions (by the transmission's own time),
+        most transmissions first. Accepts composite `system_id:unit_id` or
+        plain `unit_id`. Defaults to the last 24 hours.
+      tags: [units]
+      parameters:
+        - $ref: "#/components/parameters/unitId"
+        - name: after
+          in: query
+          description: Start of the window (RFC 3339). Defaults to 24 hours ago.
+          schema:
+            type: string
+            format: date-time
+        - name: before
+          in: query
+          description: End of the window, exclusive (RFC 3339). Defaults to now.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnitTalkgroupListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Ambiguous"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /units/{id}/events:
     get:
       operationId: listUnitEvents
@@ -6273,6 +6313,63 @@ components:
       properties:
         suggestion:
           $ref: "#/components/schemas/UnitTagSuggestion"
+
+    UnitTalkgroupListResponse:
+      type: object
+      required: [unit_id, system_id, talkgroups]
+      properties:
+        unit_id:
+          type: integer
+          example: 924003
+        system_id:
+          type: integer
+          example: 1
+        talkgroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnitTalkgroup"
+      example:
+        unit_id: 924003
+        system_id: 1
+        talkgroups:
+          - tgid: 9178
+            tg_alpha_tag: "09-8L Main"
+            calls: 4
+            transmissions: 7
+            seconds: 31.5
+            first_time: "2026-10-25T14:02:11.000Z"
+            last_time: "2026-10-25T18:40:52.000Z"
+
+    UnitTalkgroup:
+      type: object
+      required: [tgid, tg_alpha_tag, calls, transmissions, seconds, first_time, last_time]
+      properties:
+        tgid:
+          type: integer
+          example: 9178
+        tg_alpha_tag:
+          type: string
+          description: Empty when the talkgroup has no stored row
+          example: "09-8L Main"
+        calls:
+          type: integer
+          description: Distinct calls the unit transmitted in
+          example: 4
+        transmissions:
+          type: integer
+          example: 7
+        seconds:
+          type: number
+          description: Total transmission length
+          example: 31.5
+        first_time:
+          type: string
+          format: date-time
+          description: Time of the unit first transmission in the window
+        last_time:
+          type: string
+          format: date-time
+          description: Time of the unit last transmission in the window
 
     UnitEventListResponse:
       type: object

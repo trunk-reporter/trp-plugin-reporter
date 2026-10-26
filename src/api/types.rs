@@ -17,7 +17,7 @@ use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{ActiveTalkgroupRow, EncryptionStatRow, TalkgroupRow};
 use crate::store::units::unit;
-use crate::store::units::{UnitEventRow, UnitRow};
+use crate::store::units::{UnitEventRow, UnitRow, UnitTalkgroupRow};
 use crate::store::{StoreError, now_ms};
 use rusqlite::Connection;
 
@@ -1021,4 +1021,38 @@ impl Recorder {
 pub struct RecorderListResponse {
     pub recorders: Vec<Recorder>,
     pub total: usize,
+}
+
+/// The spec's `UnitTalkgroup`: one talkgroup a unit talked on in a window.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnitTalkgroup {
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub calls: i64,
+    pub transmissions: i64,
+    pub seconds: f64,
+    pub first_time: String,
+    pub last_time: String,
+}
+
+impl UnitTalkgroup {
+    pub fn from_row(row: &UnitTalkgroupRow) -> UnitTalkgroup {
+        UnitTalkgroup {
+            tgid: row.tgid,
+            tg_alpha_tag: row.tg_alpha_tag.clone(),
+            calls: row.calls,
+            transmissions: row.transmissions,
+            seconds: row.seconds,
+            first_time: rfc3339(row.first_ms),
+            last_time: rfc3339(row.last_ms),
+        }
+    }
+}
+
+/// The body of `GET /units/{id}/talkgroups`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnitTalkgroupListResponse {
+    pub unit_id: u32,
+    pub system_id: i64,
+    pub talkgroups: Vec<UnitTalkgroup>,
 }
