@@ -180,6 +180,7 @@ impl Plugin for Reporter {
             let mut state =
                 AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone());
             let log = host.clone();
+            state.cors_origins = config.cors_origins.clone();
             state.log = Arc::new(move |m| log.error(m));
             Some(server::start(state, &config.bind, config.port)?)
         };

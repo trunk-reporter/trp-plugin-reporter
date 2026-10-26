@@ -25,11 +25,15 @@ pub struct Config {
     pub retention_days: u32,
     /// Backfill from recorded calls on start
     pub backfill: bool,
+    /// Allowed origins
+    ///
+    /// Web pages served from these origins may call the API. One origin per line, such as http://192.168.1.20:8081.
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { port: 8092, bind: "127.0.0.1".into(), token: None, retention_days: 0, backfill: true }
+        Config { port: 8092, bind: "127.0.0.1".into(), token: None, retention_days: 0, backfill: true, cors_origins: Vec::new() }
     }
 }
 

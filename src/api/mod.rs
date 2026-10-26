@@ -2,6 +2,7 @@
 //! guard, and the query-parameter rules every endpoint shares.
 
 pub mod calls;
+mod cors;
 pub mod health;
 pub mod sse;
 pub mod stats;
@@ -87,6 +88,8 @@ pub struct AppState {
     pub log: Log,
     /// What `/health` says this server can do.
     pub features: Features,
+    /// Origins whose pages may call the API (`*` for any).
+    pub cors_origins: Vec<String>,
 }
 
 /// A sink for messages an operator should see.
@@ -108,6 +111,7 @@ impl AppState {
             keepalive: sse::KEEPALIVE,
             log: Arc::new(|_| {}),
             features: Features::PLUGIN,
+            cors_origins: Vec::new(),
         }
     }
 }
@@ -234,6 +238,7 @@ pub fn router(state: AppState) -> Router {
         .fallback_service(get(web::file))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .layer(middleware::from_fn_with_state(state.clone(), log_internal))
+        .layer(middleware::from_fn_with_state(state.clone(), cors::cors))
         .with_state(state)
 }
 
