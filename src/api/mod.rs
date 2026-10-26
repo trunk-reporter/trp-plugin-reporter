@@ -150,7 +150,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/call-upload",
     "/call-groups",
     "/call-groups/{id}",
-    "/stats/talkgroup-activity",
     "/stats/call-volume",
     "/stats/daily-overview",
     "/stats/category-breakdown",
@@ -218,6 +217,7 @@ pub fn router(state: AppState) -> Router {
         .route("/unit-affiliations", get(units::affiliations))
         .route("/stats", get(stats::stats))
         .route("/stats/rates", get(stats::rates))
+        .route("/stats/talkgroup-activity", get(stats::talkgroup_activity))
         .route("/recorders", get(stats::recorders))
         .route("/events/stream", get(sse::stream))
         .route("/calls", get(calls::list))
@@ -348,6 +348,18 @@ pub fn time_range(q: &Query) -> Result<(Option<i64>, Option<i64>), ApiError> {
     Ok((start, end))
 }
 
+/// The time window `[after, before]` in Unix ms: `after` / `before` (RFC 3339, any offset;
+/// `start_time` / `end_time` are aliases), defaulting to `default_after_ms` and `now_ms`.
+/// An `after` later than `before` is `InvalidTimeRange`.
+pub fn window(q: &Query, default_after_ms: i64, now_ms: i64) -> Result<(i64, i64), ApiError> {
+    let after = time_param(q, "after")?.or(time_param(q, "start_time")?).unwrap_or(default_after_ms);
+    let before = time_param(q, "before")?.or(time_param(q, "end_time")?).unwrap_or(now_ms);
+    if after > before {
+        return Err(ApiError::InvalidTimeRange("after is later than before".into()));
+    }
+    Ok((after, before))
+}
+
 /// Every id in the comma lists of the parameters `names` (aliases of one filter,
 /// e.g. `["tgid", "tgids"]`), decimal; values that aren't numbers are ignored.
 pub fn ids(q: &Query, names: &[&str]) -> Vec<i64> {
@@ -418,6 +430,17 @@ mod tests {
         assert_eq!(composite("1-9178").unwrap(), (Some(1), 9178));
         assert_eq!(composite("9178").unwrap(), (None, 9178));
         assert!(matches!(time_range(&q(&[("start_time", "2024-01-02T00:00:00Z"), ("end_time", "2024-01-01T00:00:00Z")])), Err(ApiError::InvalidTimeRange(_))));
+        let w = |pairs: &[(&str, &str)]| window(&q(pairs), 100, 200);
+        assert_eq!(w(&[]).unwrap(), (100, 200));
+        assert_eq!(w(&[("after", "1970-01-01T00:00:01Z"), ("before", "1970-01-01T00:00:02Z")]).unwrap(), (1_000, 2_000));
+        assert_eq!(w(&[("start_time", "1970-01-01T00:00:01Z"), ("end_time", "1970-01-01T00:00:02Z")]).unwrap(), (1_000, 2_000));
+        assert_eq!(
+            w(&[("after", "1970-01-01T00:00:01Z"), ("start_time", "1970-01-01T00:00:09Z"), ("before", "1970-01-01T00:00:10Z")]).unwrap().0,
+            1_000,
+            "after wins over its alias"
+        );
+        assert!(matches!(w(&[("after", "1970-01-01T00:00:03Z")]), Err(ApiError::InvalidTimeRange(_))), "after past the default before");
+        assert!(matches!(w(&[("before", "soon")]), Err(ApiError::InvalidParameter(_))));
         assert_eq!(rfc3339(1_705_314_600_000), "2024-01-15T10:30:00.000Z");
         assert_eq!((hex(Some(0xBEE00)), hex(None)), ("BEE00".into(), "0".into()));
     }

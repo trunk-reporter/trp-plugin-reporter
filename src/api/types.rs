@@ -12,7 +12,7 @@ use time::macros::format_description;
 use crate::affiliations::AffiliationEntry;
 use crate::store::calls::{CallRow, FrequencyRow, TransmissionRow, frequencies, transmissions, units_of};
 use crate::store::recorder::RecorderStateRow;
-use crate::store::stats::ActivityRow;
+use crate::store::stats::{ActivityBucketRow, ActivityRow, TalkgroupActivityRow};
 use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::systems::{site_by_id, system_by_id};
 use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
@@ -824,6 +824,66 @@ impl SystemActivity {
             active_units: row.active_units,
         }
     }
+}
+
+/// The spec's `ActivityBucket`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ActivityBucket {
+    pub time: String,
+    pub calls: i64,
+    pub seconds: f64,
+}
+
+impl ActivityBucket {
+    pub fn from_row(row: &ActivityBucketRow) -> ActivityBucket {
+        ActivityBucket { time: rfc3339(row.start_ms), calls: row.calls, seconds: row.seconds }
+    }
+}
+
+/// The spec's `TalkgroupActivity`; `buckets` is there when the request asked for an `interval`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TalkgroupActivity {
+    pub system_id: i64,
+    pub system_name: String,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub tg_description: String,
+    pub tg_tag: String,
+    pub tg_group: String,
+    pub call_count: i64,
+    pub total_duration: f64,
+    pub emergency_count: i64,
+    pub first_call: String,
+    pub last_call: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buckets: Option<Vec<ActivityBucket>>,
+}
+
+impl TalkgroupActivity {
+    pub fn from_rows(row: &TalkgroupActivityRow, system: Option<&SystemRow>) -> TalkgroupActivity {
+        TalkgroupActivity {
+            system_id: row.system_id.0,
+            system_name: system.map(display_name).unwrap_or_default(),
+            tgid: row.tgid,
+            tg_alpha_tag: row.alpha_tag.clone(),
+            tg_description: row.description.clone(),
+            tg_tag: row.tag.clone(),
+            tg_group: row.group.clone(),
+            call_count: row.call_count,
+            total_duration: row.total_duration,
+            emergency_count: row.emergency_count,
+            first_call: rfc3339(row.first_call_ms),
+            last_call: rfc3339(row.last_call_ms),
+            buckets: None,
+        }
+    }
+}
+
+/// The body of `GET /stats/talkgroup-activity` (inline in the spec). `total` counts every matching talkgroup, not the page.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TalkgroupActivityResponse {
+    pub activity: Vec<TalkgroupActivity>,
+    pub total: usize,
 }
 
 /// The spec's `StatsResponse`. `systems` counts sites ("total recording sites").

@@ -2716,6 +2716,12 @@ paths:
           schema:
             type: string
             default: COMPLETED
+        - name: interval
+          in: query
+          description: Bucket size in seconds; when given, each item carries `buckets` (non-empty buckets only, aligned to the epoch).
+          schema:
+            type: integer
+            enum: [10, 30, 60, 300, 900, 3600]
         - name: sort
           in: query
           description: Sort field — "calls" (default), "duration", "tgid"
@@ -6546,6 +6552,29 @@ components:
         last_call:
           type: string
           format: date-time
+        buckets:
+          type: array
+          description: Calls per time bucket, present when the request sets `interval`. Only buckets with calls are listed.
+          items:
+            $ref: "#/components/schemas/ActivityBucket"
+
+    ActivityBucket:
+      type: object
+      required: [time, calls, seconds]
+      properties:
+        time:
+          type: string
+          format: date-time
+          description: Start of the bucket, a multiple of the interval since the epoch
+          example: "2026-03-01T14:05:00.000Z"
+        calls:
+          type: integer
+          description: Calls that started in the bucket
+          example: 4
+        seconds:
+          type: number
+          description: Total duration in seconds of those calls
+          example: 37.5
 
     CallVolumeBucket:
       type: object

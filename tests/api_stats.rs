@@ -3,7 +3,9 @@ mod common;
 use axum::http::StatusCode;
 use common::*;
 use serde_json::Value;
+use trunk_recorder_plugin::CallRecord;
 use trunk_reporter::api::rfc3339;
+use trunk_reporter::store::calls::call_concluded;
 use trunk_reporter::store::recorder::insert_recorder_state;
 
 #[tokio::test]
@@ -145,5 +147,136 @@ async fn other_stats_are_501() {
     for path in ["/api/v1/stats/call-heatmap", "/api/v1/analytics/decode-rates", "/api/v1/stats/call-volume", "/api/v1/analytics/recorder-utilization"] {
         let (st, _) = get(&app, path).await;
         assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{path}");
+    }
+}
+
+/// Two calls on tg 555 of sys1, which has no `talkgroups` row (20 and 21 minutes ago, 4 s each).
+fn unnamed_talkgroup_calls(store: &trunk_reporter::store::Store, s: &Seed) {
+    let (sys1, site1, now) = (s.sys1, s.site1, s.now);
+    store
+        .write_sync(move |c| {
+            for (n, ago) in [20 * MIN, 21 * MIN].into_iter().enumerate() {
+                let start = now - ago;
+                let r = CallRecord {
+                    call_num: 900 + n as u64,
+                    freq: 851_012_500,
+                    start_time: start / 1000,
+                    stop_time: start / 1000 + 4,
+                    start_time_ms: start,
+                    stop_time_ms: start + 4_000,
+                    call_length: 4.0,
+                    call_length_ms: 4_000,
+                    talkgroup: 555,
+                    short_name: "ohmarcs".into(),
+                    ..Default::default()
+                };
+                call_concluded(c, sys1, Some(site1), &format!("ohmarcs/555-{start}"), &r, None, "x.json", None)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn talkgroup_activity_summarises_the_window() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    unnamed_talkgroup_calls(&store, &s);
+
+    let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity").await;
+    assert_eq!(st, StatusCode::OK);
+    // The last 24 h, completed calls: c1, c2 (tg 101), c3 (tg 202; c4 is stopped, not completed) and two on 555.
+    let items = v["activity"].as_array().unwrap();
+    assert_eq!(v["total"], 3);
+    for i in items {
+        assert_schema(i, "TalkgroupActivity");
+        assert!(i.get("buckets").is_none(), "no interval, no buckets");
+    }
+    let row = |i: &Value| {
+        (
+            i["tgid"].as_i64().unwrap(),
+            i["tg_alpha_tag"].as_str().unwrap().to_string(),
+            i["call_count"].as_i64().unwrap(),
+            i["total_duration"].as_f64().unwrap(),
+            i["emergency_count"].as_i64().unwrap(),
+        )
+    };
+    // By call count, then tgid: 101 and 555 tie on 2.
+    assert_eq!(row(&items[0]), (101, "Fire Disp".into(), 2, 20.0, 1));
+    assert_eq!(row(&items[1]), (555, "".into(), 2, 8.0, 0));
+    assert_eq!(row(&items[2]), (202, "PD Tac".into(), 1, 20.0, 0));
+    assert_eq!((items[0]["system_id"].as_i64(), items[0]["system_name"].as_str()), (Some(s.sys1.0), Some("ohmarcs")));
+    assert_eq!(
+        (items[0]["tg_group"].as_str(), items[0]["tg_tag"].as_str(), items[0]["tg_description"].as_str()),
+        (Some("Fire"), Some("Dispatch"), Some("Fire Dispatch"))
+    );
+    assert_eq!(items[0]["first_call"], rfc3339(s.now - 30 * MIN));
+    assert_eq!(items[0]["last_call"], rfc3339(s.now - 10 * MIN));
+
+    // Every state, and a wider window: c4 and c5 join.
+    let (_, v) = get(&app, "/api/v1/stats/talkgroup-activity?call_state=&sort=tgid").await;
+    let tgs: Vec<(i64, i64)> = v["activity"].as_array().unwrap().iter().map(|i| (i["tgid"].as_i64().unwrap(), i["call_count"].as_i64().unwrap())).collect();
+    assert_eq!(tgs, vec![(101, 2), (202, 2), (555, 2)]);
+    let after = rfc3339(s.now - 4 * DAY);
+    let (_, v) = get(&app, &format!("/api/v1/stats/talkgroup-activity?after={after}&tgids=101&limit=1")).await;
+    assert_eq!((v["total"].as_i64(), v["activity"][0]["call_count"].as_i64()), (Some(1), Some(3)));
+    let (_, v) = get(&app, &format!("/api/v1/stats/talkgroup-activity?start_time={after}&system_id={}&sort=duration", s.sys2.0)).await;
+    assert_eq!((v["total"].as_i64(), v["activity"].as_array().unwrap().len()), (Some(0), 0));
+    let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity?after=2024-01-02T00:00:00Z&before=2024-01-01T00:00:00Z").await;
+    assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_time_range")));
+}
+
+#[tokio::test]
+async fn talkgroup_activity_buckets_by_interval() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    unnamed_talkgroup_calls(&store, &s);
+
+    let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity?interval=60").await;
+    assert_eq!(st, StatusCode::OK);
+    let items = v["activity"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    for i in items {
+        assert_schema(i, "TalkgroupActivity");
+        let buckets = i["buckets"].as_array().unwrap();
+        let mut calls = 0;
+        let mut seconds = 0.0;
+        for b in buckets {
+            assert_schema(b, "ActivityBucket");
+            let t = time::OffsetDateTime::parse(b["time"].as_str().unwrap(), &time::format_description::well_known::Rfc3339).unwrap();
+            assert_eq!(t.unix_timestamp() % 60, 0, "{b}");
+            calls += b["calls"].as_i64().unwrap();
+            seconds += b["seconds"].as_f64().unwrap();
+        }
+        assert_eq!(calls, i["call_count"].as_i64().unwrap());
+        assert!((seconds - i["total_duration"].as_f64().unwrap()).abs() < 1e-9);
+    }
+    // tg 101: c2 (8 s) 30 minutes ago and c1 (12 s) 10 minutes ago, in minutes of their own.
+    let minute = |ago: i64| rfc3339((s.now - ago) / 60_000 * 60_000);
+    let b = &items[0]["buckets"];
+    assert_eq!(b.as_array().unwrap().len(), 2);
+    assert_eq!((b[0]["time"].as_str(), b[0]["calls"].as_i64(), b[0]["seconds"].as_f64()), (Some(minute(30 * MIN).as_str()), Some(1), Some(8.0)));
+    assert_eq!((b[1]["time"].as_str(), b[1]["calls"].as_i64(), b[1]["seconds"].as_f64()), (Some(minute(10 * MIN).as_str()), Some(1), Some(12.0)));
+}
+
+#[tokio::test]
+async fn too_many_buckets_is_a_400() {
+    let (app, store, _, _) = app();
+    seed(&store);
+    let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity?after=2020-01-01T00:00:00Z&interval=10").await;
+    assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")));
+    assert!(v["error"].as_str().unwrap().contains("at most 10000"), "{v}");
+    // The same window in hour buckets is within the cap only if few talkgroups were heard: 2 here, ~58 000 hours.
+    let (st, _) = get(&app, "/api/v1/stats/talkgroup-activity?after=2026-01-01T00:00:00Z&interval=3600&tgid=101").await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_bad_interval_is_a_400() {
+    let (app, store, _, _) = app();
+    seed(&store);
+    for interval in ["7", "0", "-60", "minute", "61"] {
+        let (st, v) = get(&app, &format!("/api/v1/stats/talkgroup-activity?interval={interval}")).await;
+        assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")), "{interval}");
     }
 }
