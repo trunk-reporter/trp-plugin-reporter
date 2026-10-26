@@ -330,6 +330,13 @@ impl Ingest {
         }
     }
 
+    /// The system's row id from the caches alone (by short name, else by this
+    /// run's index); never waits on the store. For live audio, which comes
+    /// after the call's `call.start` has seen its system.
+    pub fn system_id_of(&self, index: u16, short_name: &str) -> Option<SystemId> {
+        if short_name.is_empty() { self.by_index.get(&index).copied() } else { self.by_name.get(short_name).copied() }
+    }
+
     /// The site's row id, added the first time it is seen (waiting on the store).
     fn site(&mut self, system_id: SystemId, name: &str) -> Option<SiteId> {
         let key = (system_id, name.to_string());

@@ -15,7 +15,7 @@ publish = false
 [dependencies]
 trunk-recorder-plugin = "0.5"
 rusqlite = { version = "0.41", features = ["bundled"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tower-http = { version = "0.6", features = ["fs"] }
 tower = "0.5"
@@ -36,6 +36,8 @@ futures-util = "0.3"
 http-body-util = "0.1"
 # Raw sockets in the SSE tests.
 tokio = { version = "1", features = ["io-util"] }
+# WebSocket clients in the live-audio tests.
+tokio-tungstenite = "0.26"
 
 [profile.release]
 strip = true

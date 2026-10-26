@@ -89,6 +89,9 @@ fn the_plugin_serves_while_running_and_stops_cleanly() {
     let h: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(h["trunk_recorders"][0]["status"], "connected");
     assert_eq!(h["trunk_recorders"][0]["instance_id"], "test");
+    // Live audio is there (a plain GET, not an upgrade, is refused as such).
+    let (status, body) = get(port, "/api/v1/audio/live").unwrap();
+    assert_eq!(status, 400, "{body}");
     drop(stdin);
     assert_eq!(wait_exit(&mut child, Duration::from_secs(5)), Some(0));
     // Stopped: the port is free again.
@@ -114,6 +117,8 @@ fn serve_mode_opens_an_existing_store() {
     assert_eq!(h["trunk_recorders"][0]["status"], "disconnected");
     assert_eq!(h["trunk_recorders"][0]["instance_id"], "test");
     assert_eq!(h["features"]["live_audio"], false);
+    let (status, body) = get(port, "/api/v1/audio/live").unwrap();
+    assert_eq!(status, 404, "no recorder, no live audio: {body}");
     let (status, body) = get(port, "/api/v1/calls").unwrap();
     assert_eq!(status, 200);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["total"], 1, "{body}");

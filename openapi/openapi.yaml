@@ -3503,6 +3503,32 @@ paths:
         - Subscribe: `{"type": "subscribe", "tgids": [1001, 1002], "systems": [1]}`
         - Unsubscribe: `{"type": "unsubscribe"}`
 
+        **In the Trunk Recorder Pro plugin:**
+        The audio is the recorder's live audio, taken from the recorder
+        itself (no `STREAM_LISTEN`).
+        - Frames are PCM only (no Opus): 16-bit little-endian samples at
+          the header's sample rate (8000 Hz from Trunk Recorder Pro).
+        - The header is 14 bytes, all big-endian, as tr-engine's server
+          writes it: bytes 0–1 `system_id` (uint16), 2–5 `tgid` (uint32),
+          6–9 `ts_ms` (uint32, ms since this connection opened), 10–11
+          `seq` (uint16, counted per `(system_id, tgid)` from 1, wrapping),
+          12–13 `sample_rate` (uint16); the PCM follows from byte 14.
+        - Subscribe: `{"type": "subscribe", "tgids": [...], "systems": [...]}`.
+          A missing or empty list matches every value; with both lists,
+          a frame must match both. `{"type": "unsubscribe"}` matches
+          nothing. A client that has sent nothing hears every talkgroup.
+          Other text and binary messages from the client are ignored.
+        - Keepalive every 15 s: `{"type": "keepalive", "active_streams": N}`,
+          N the number of clients connected.
+        - A client that reads too slowly loses the oldest frames (the
+          server keeps 256 for it) and is told how many, then the stream
+          goes on: `{"type": "lagged", "dropped": N}`.
+        - No `call_start` / `call_end` text frames (they are on
+          `/events/stream`).
+        - 404 `not_found` when the server has no recorder
+          (`trunk-reporter serve`); 503 `service_unavailable` when 16
+          clients are connected already.
+
       tags: [events]
       parameters:
         - name: token

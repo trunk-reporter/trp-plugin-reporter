@@ -19,6 +19,7 @@ use trunk_recorder_plugin::{CallInfo, CallRecord, FreqEntry, SrcEntry};
 
 use trunk_reporter::affiliations::Affiliations;
 use trunk_reporter::api::{AppState, HostStatus, router};
+use trunk_reporter::audio::{AudioBus, BUS_CAPACITY};
 use trunk_reporter::bus::Bus;
 use trunk_reporter::store::calls::{NewCall, call_concluded, call_ended, call_started};
 use trunk_reporter::store::recorder::insert_recorder_state;
@@ -65,6 +66,14 @@ pub fn state_with(token: Option<&str>) -> (AppState, Store, Bus, Affiliations) {
     host.touch(now_ms());
     let state = AppState::new(store.clone(), bus.clone(), affiliations.clone(), temp_capture_dir(), token.map(String::from), host);
     (state, store, bus, affiliations)
+}
+
+/// [`state_with`] plus a live-audio bus, as the plugin has (serve mode has none).
+pub fn state_with_audio(token: Option<&str>) -> (AppState, AudioBus) {
+    let (mut state, ..) = state_with(token);
+    let bus = AudioBus::new(BUS_CAPACITY);
+    state.audio = Some(bus.clone());
+    (state, bus)
 }
 
 /// Send any request.

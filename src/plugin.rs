@@ -9,10 +9,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use trunk_recorder_plugin::{CallInfo, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic};
+use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic};
 
 use crate::affiliations::Affiliations;
 use crate::api::{AppState, HostStatus};
+use crate::audio::{AudioBus, AudioFrame, BUS_CAPACITY};
 use crate::backfill::backfill;
 use crate::bus::Bus;
 use crate::config::{Config, SystemConfig};
@@ -44,6 +45,15 @@ pub struct Reporter {
     maintenance: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     /// Set at shutdown: a backfill still walking stops (and stays incomplete).
     stop_backfill: Arc<AtomicBool>,
+    /// The recorder's live audio, for `/audio/live`'s clients.
+    audio: AudioBus,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A receiver on the bus of the last plugin started on this thread, for the
+    /// tests that run the plugin through `testing::run` (which keeps the plugin).
+    static AUDIO_TAP: std::cell::RefCell<Option<tokio::sync::broadcast::Receiver<AudioFrame>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn calls_stored(store: &Store) -> i64 {
@@ -134,7 +144,14 @@ impl Plugin for Reporter {
     fn manifest() -> Manifest {
         Manifest {
             name: "Reporter".into(),
-            subscribe: vec![topic::CALL_START.into(), topic::CALL_END.into(), topic::CALL_CONCLUDED.into(), topic::UNIT.into(), topic::STATUS.into()],
+            subscribe: vec![
+                topic::CALL_START.into(),
+                topic::CALL_END.into(),
+                topic::CALL_CONCLUDED.into(),
+                topic::UNIT.into(),
+                topic::STATUS.into(),
+                topic::AUDIO.into(),
+            ],
             // `--describe` has no settings, so this is the default port's URL;
             // a changed port is only in the log and status line.
             homepage: "http://127.0.0.1:8092/".into(),
@@ -171,6 +188,9 @@ impl Plugin for Reporter {
         let recent = store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?;
         affiliations.rebuild(&recent);
 
+        let audio = AudioBus::new(BUS_CAPACITY);
+        #[cfg(test)]
+        AUDIO_TAP.with(|t| *t.borrow_mut() = Some(audio.subscribe()));
         let config = &setup.config;
         let host_status = HostStatus::new(&setup.host.name, true);
         host_status.touch(now_ms());
@@ -182,6 +202,7 @@ impl Plugin for Reporter {
             let log = host.clone();
             state.cors_origins = config.cors_origins.clone();
             state.log = Arc::new(move |m| log.error(m));
+            state.audio = Some(audio.clone());
             Some(server::start(state, &config.bind, config.port)?)
         };
         let serving = server.as_ref().map(ServerHandle::url);
@@ -231,7 +252,7 @@ impl Plugin for Reporter {
         }
 
         let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days)?;
-        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill })
+        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill, audio })
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -248,6 +269,15 @@ impl Plugin for Reporter {
 
     fn unit(&mut self, event: UnitEvent) {
         self.ingest.handle(HostMessage::Unit(event));
+    }
+
+    /// Published to the live-audio clients; no I/O, no waiting. A chunk of a
+    /// system not yet seen is dropped.
+    fn audio(&mut self, chunk: AudioChunk) {
+        let Some(system_id) = self.ingest.system_id_of(chunk.system, &chunk.short_name) else { return };
+        let pcm: Arc<[u8]> = trunk_recorder_plugin::base64::decode(&chunk.pcm).into();
+        let sample_rate = u16::try_from(chunk.sample_rate).unwrap_or(u16::MAX);
+        self.audio.publish(AudioFrame { system_id: system_id.0, tgid: chunk.talkgroup, sample_rate, pcm });
     }
 
     fn status(&mut self, status: Status) {
@@ -279,10 +309,10 @@ mod tests {
     use trunk_recorder_plugin::{HostInfo, NoConfig, Outcome, System, testing};
 
     #[test]
-    fn the_manifest_subscribes_to_what_phase_1_needs() {
+    fn the_manifest_subscribes_to_what_the_plugin_needs() {
         let m = trunk_recorder_plugin::describe::<Reporter>();
         assert_eq!(m.id, "trunk-reporter");
-        assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && !m.subscribes("audio"));
+        assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && m.subscribes("audio"));
         assert!(m.config.is_some() && m.system_config.is_none());
     }
 
@@ -299,6 +329,26 @@ mod tests {
         let store = crate::store::Store::open(&dir.join("data/engine.sqlite")).unwrap();
         assert_eq!(store.read(|c| c.query_row("SELECT count(*) FROM calls", [], |r| r.get::<_, i64>(0))).unwrap(), 1);
         assert_eq!(store.read(|c| crate::store::systems::meta_get(c, "host_name")).unwrap(), Some("test".into()));
+    }
+
+    #[test]
+    fn an_audio_chunk_becomes_a_frame_for_the_stores_system_id() {
+        let dir = testing::temp_dir("reporter-audio");
+        let call =
+            CallInfo { id: 7, system: 0, short_name: "sys1".into(), talkgroup: 9178, recording: true, start_time: 1_700_000_000.0, ..Default::default() };
+        let out = testing::run::<Reporter>([
+            HostMessage::Hello(testing::hello(&dir, json!({"port": 0, "backfill": false}))),
+            HostMessage::CallStart(call),
+            HostMessage::Audio(trunk_recorder_plugin::AudioChunk::new(7, 0, 9178, 8000, &[1, -1, 300])),
+        ]);
+        assert!(out.ready());
+        let mut rx = AUDIO_TAP.with(|t| t.borrow_mut().take()).expect("the plugin's bus was tapped");
+        let frame = rx.try_recv().expect("one frame");
+        assert!(rx.try_recv().is_err(), "only one frame");
+        let store = Store::open(&dir.join("data/engine.sqlite")).unwrap();
+        let sys1: i64 = store.read(|c| c.query_row("SELECT id FROM systems WHERE short_name = 'sys1'", [], |r| r.get(0))).unwrap();
+        assert_eq!((frame.system_id, frame.tgid, frame.sample_rate), (sys1, 9178, 8000));
+        assert_eq!(&frame.pcm[..], &[1, 0, 255, 255, 44, 1]);
     }
 
     #[test]

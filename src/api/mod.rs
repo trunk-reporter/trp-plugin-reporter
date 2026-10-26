@@ -1,6 +1,7 @@
 //! tr-engine's REST API under `/api/v1`: shared state, the router, the token
 //! guard, and the query-parameter rules every endpoint shares.
 
+pub mod audio;
 pub mod calls;
 mod cors;
 pub mod health;
@@ -14,6 +15,7 @@ pub mod units;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::affiliations::Affiliations;
+use crate::audio::AudioBus;
 use crate::bus::Bus;
 use crate::store::Store;
 use crate::web::{self, Pages};
@@ -91,6 +94,12 @@ pub struct AppState {
     pub features: Features,
     /// Origins whose pages may call the API (`*` for any).
     pub cors_origins: Vec<String>,
+    /// The recorder's live audio; `None` (serve mode) and `/audio/live` is a 404.
+    pub audio: Option<AudioBus>,
+    /// Live-audio clients connected now (at most [`audio::MAX_CLIENTS`]).
+    pub audio_clients: Arc<AtomicUsize>,
+    /// How often a live-audio client gets a keepalive message.
+    pub audio_keepalive: Duration,
 }
 
 /// A sink for messages an operator should see.
@@ -113,6 +122,9 @@ impl AppState {
             log: Arc::new(|_| {}),
             features: Features::PLUGIN,
             cors_origins: Vec::new(),
+            audio: None,
+            audio_clients: Arc::new(AtomicUsize::new(0)),
+            audio_keepalive: audio::KEEPALIVE,
         }
     }
 }
@@ -159,7 +171,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/analytics/decode-rates",
     "/trunking-messages",
     "/console-messages",
-    "/audio/live",
     "/audio/jitter",
     "/admin/systems/merge",
     "/admin/maintenance",
@@ -189,6 +200,7 @@ pub const SERVED_PREFIXES: &[&str] = &[
     "first-heard",
     "events",
     "preferences",
+    "audio",
     "pages",
     "openapi.yaml",
 ];
@@ -227,6 +239,7 @@ pub fn router(state: AppState) -> Router {
         .route("/recorders", get(stats::recorders))
         .route("/first-heard", get(stats::first_heard))
         .route("/events/stream", get(sse::stream))
+        .route("/audio/live", get(audio::live))
         .route("/calls", get(calls::list))
         .route("/calls/active", get(calls::active))
         .route("/calls/{id}", get(calls::one))
