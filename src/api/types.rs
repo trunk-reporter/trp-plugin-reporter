@@ -21,6 +21,29 @@ use crate::store::units::{UnitEventRow, UnitRow};
 use crate::store::{StoreError, now_ms};
 use rusqlite::Connection;
 
+/// What this server can do, so a client can hide what would not work.
+#[derive(Serialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Features {
+    pub transcriptions: bool,
+    pub live_audio: bool,
+    pub hub: bool,
+    pub recorders: bool,
+    pub call_groups: bool,
+    pub directory: bool,
+    pub users: bool,
+}
+
+impl Features {
+    /// Inside the recorder: live audio is there.
+    pub const PLUGIN: Features = Features { live_audio: true, recorders: true, ..Features::none() };
+    /// `trunk-reporter serve`: the stored data only, no recorder to listen to.
+    pub const SERVE: Features = Features { recorders: true, ..Features::none() };
+
+    const fn none() -> Features {
+        Features { transcriptions: false, live_audio: false, hub: false, recorders: false, call_groups: false, directory: false, users: false }
+    }
+}
+
 /// The spec's `Error`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Error {

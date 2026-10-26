@@ -30,7 +30,7 @@ use crate::bus::Bus;
 use crate::store::Store;
 use crate::web::{self, Pages};
 
-pub use types::{ApiError, hex, rfc3339};
+pub use types::{ApiError, Features, hex, rfc3339};
 
 /// A request's query parameters.
 pub type Query = HashMap<String, String>;
@@ -85,13 +85,15 @@ pub struct AppState {
     /// Where an internal error's (a 500's) message goes: the recorder's log,
     /// stderr in `serve` mode; nowhere by default.
     pub log: Log,
+    /// What `/health` says this server can do.
+    pub features: Features,
 }
 
 /// A sink for messages an operator should see.
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
 impl AppState {
-    /// Started now, this crate's version, the embedded pages. An empty token is no token.
+    /// Started now, plugin-mode features, this crate's version, the embedded pages. An empty token is no token.
     pub fn new(store: Store, bus: Bus, affiliations: Affiliations, capture_dir: PathBuf, token: Option<String>, host: HostStatus) -> AppState {
         AppState {
             store,
@@ -105,6 +107,7 @@ impl AppState {
             pages: Arc::new(Pages::scan()),
             keepalive: sse::KEEPALIVE,
             log: Arc::new(|_| {}),
+            features: Features::PLUGIN,
         }
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::affiliations::Affiliations;
-use crate::api::{AppState, HostStatus, router};
+use crate::api::{AppState, Features, HostStatus, router};
 use crate::bus::Bus;
 use crate::config::Config;
 use crate::store::systems::meta_get;
@@ -121,6 +121,7 @@ pub fn serve_data_dir(data_dir: &Path) -> Result<ServerHandle, String> {
     let affiliations = Affiliations::new();
     affiliations.rebuild(&store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?);
     let mut state = AppState::new(store, Bus::new(BUS_RING), affiliations, capture_dir.into(), config.token.clone(), HostStatus::new(&host_name, false));
+    state.features = Features::SERVE;
     state.log = Arc::new(|m| eprintln!("{m}"));
     start(state, &config.bind, config.port)
 }

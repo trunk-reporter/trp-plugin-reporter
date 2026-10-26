@@ -113,6 +113,7 @@ fn serve_mode_opens_an_existing_store() {
     let h = health(port);
     assert_eq!(h["trunk_recorders"][0]["status"], "disconnected");
     assert_eq!(h["trunk_recorders"][0]["instance_id"], "test");
+    assert_eq!(h["features"]["live_audio"], false);
     let (status, body) = get(port, "/api/v1/calls").unwrap();
     assert_eq!(status, 200);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["total"], 1, "{body}");

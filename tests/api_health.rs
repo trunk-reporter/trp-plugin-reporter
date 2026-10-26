@@ -179,3 +179,14 @@ fn the_schema_check_catches_mismatches() {
     assert!(fails(json!({"code": "ambiguous_id", "error": "x", "matches": [1]}), "AmbiguousError"), "array items are checked");
     assert!(fails(json!({"code": null, "error": "x"}), "Error"), "null where not nullable");
 }
+
+#[tokio::test]
+async fn health_says_what_this_server_can_do() {
+    let (s, v) = get(&app().0, "/api/v1/health").await;
+    assert_eq!(s, 200);
+    assert_schema(&v, "HealthResponse");
+    let f = &v["features"];
+    let flag = |k: &str| f[k].as_bool().unwrap_or_else(|| panic!("features.{k} is a boolean: {f}"));
+    assert_eq!((flag("transcriptions"), flag("live_audio"), flag("hub"), flag("recorders")), (false, true, false, true));
+    assert_eq!((flag("call_groups"), flag("directory"), flag("users")), (false, false, false));
+}

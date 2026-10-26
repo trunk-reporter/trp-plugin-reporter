@@ -7,7 +7,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use super::{AppState, rfc3339};
+use super::{AppState, Features, rfc3339};
 
 /// The spec this API serves.
 pub const SPEC: &str = include_str!("../../openapi/openapi.yaml");
@@ -19,6 +19,7 @@ pub struct HealthResponse {
     pub uptime_seconds: u64,
     pub checks: Checks,
     pub trunk_recorders: Vec<TrunkRecorder>,
+    pub features: Features,
 }
 
 #[derive(Serialize)]
@@ -48,6 +49,7 @@ pub async fn health(State(state): State<AppState>) -> Response {
             status: if host.connected { "connected" } else { "disconnected" },
             last_seen: host.last_seen_ms.map(rfc3339),
         }],
+        features: state.features,
     };
     let status = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, Json(body)).into_response()

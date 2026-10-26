@@ -6089,6 +6089,35 @@ components:
               nullable: true
               description: ISO 8601 timestamp of the last audio chunk received from the stream source. Null if no chunks have been received yet.
               example: "2026-03-05T14:30:00Z"
+        features:
+          $ref: "#/components/schemas/Features"
+
+    Features:
+      type: object
+      description: What this server can do, so a client can hide what would not work.
+      required: [transcriptions, live_audio, hub, recorders, call_groups, directory, users]
+      properties:
+        transcriptions:
+          type: boolean
+          description: Whether calls are transcribed.
+        live_audio:
+          type: boolean
+          description: Whether live audio is available, which needs a recorder attached.
+        hub:
+          type: boolean
+          description: Whether this server is a hub that other servers report to.
+        recorders:
+          type: boolean
+          description: Whether the recorders list is available.
+        call_groups:
+          type: boolean
+          description: Whether calls are grouped across recorders.
+        directory:
+          type: boolean
+          description: Whether the talkgroup and unit directory can be edited.
+        users:
+          type: boolean
+          description: Whether user accounts and sign-in are available.
 
     # --- Paginated list responses ---
 
