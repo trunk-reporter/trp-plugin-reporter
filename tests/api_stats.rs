@@ -2,9 +2,9 @@ mod common;
 
 use axum::http::StatusCode;
 use common::*;
-use reporter::api::rfc3339;
-use reporter::store::recorder::insert_recorder_state;
 use serde_json::Value;
+use trunk_reporter::api::rfc3339;
+use trunk_reporter::store::recorder::insert_recorder_state;
 
 #[tokio::test]
 async fn stats_count_calls_in_windows_and_per_system() {

@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn the_manifest_subscribes_to_what_phase_1_needs() {
         let m = trunk_recorder_plugin::describe::<Reporter>();
-        assert_eq!(m.id, "reporter");
+        assert_eq!(m.id, "trunk-reporter");
         assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && !m.subscribes("audio"));
         assert!(m.config.is_some() && m.system_config.is_none());
     }

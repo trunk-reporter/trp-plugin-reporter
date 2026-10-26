@@ -6,8 +6,8 @@ mod common;
 use axum::http::{Method, StatusCode};
 use common::{app, app_with, get, get_with, request};
 use regex::Regex;
-use reporter::api::SERVED_PREFIXES;
-use reporter::web::Assets;
+use trunk_reporter::api::SERVED_PREFIXES;
+use trunk_reporter::web::Assets;
 
 #[tokio::test]
 async fn pages_are_listed_from_their_meta_tags_in_order() {

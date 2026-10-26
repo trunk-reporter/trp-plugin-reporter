@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use trunk_recorder_plugin::{HostMessage, testing};
 
-use reporter::plugin::Reporter;
+use trunk_reporter::plugin::Reporter;
 
-const BIN: &str = env!("CARGO_BIN_EXE_reporter");
+const BIN: &str = env!("CARGO_BIN_EXE_trunk-reporter");
 
 /// A port nothing listens on (bound, then let go).
 fn free_port() -> u16 {

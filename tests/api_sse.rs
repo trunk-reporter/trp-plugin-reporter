@@ -5,10 +5,10 @@ mod common;
 use std::time::Duration;
 
 use axum::Router;
-use reporter::bus::{Bus, EventKind, NewEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use trunk_reporter::bus::{Bus, EventKind, NewEvent};
 
 fn ev(kind: EventKind, data: &str) -> NewEvent {
     NewEvent { kind, sub_type: None, system_id: None, site_id: None, tgid: None, unit_id: None, emergency: false, data: data.into() }
@@ -139,7 +139,7 @@ async fn a_token_in_the_query_opens_the_stream() {
 async fn an_idle_stream_sends_keepalive_comments() {
     let (mut state, _s, _b, _a) = common::state_with(None);
     state.keepalive = Duration::from_millis(50);
-    let addr = serve(reporter::api::router(state)).await;
+    let addr = serve(trunk_reporter::api::router(state)).await;
     let (mut s, _head, body) = open(addr, "/api/v1/events/stream", "").await;
     let mut pending = Pending::new(body);
     assert_eq!(frame(&mut s, &mut pending).await, ": keepalive\n\n");

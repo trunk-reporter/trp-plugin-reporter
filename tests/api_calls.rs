@@ -2,11 +2,11 @@ mod common;
 
 use axum::http::StatusCode;
 use common::*;
-use reporter::api::{rfc3339, router};
-use reporter::store::calls::{NewCall, call_started};
-use reporter::store::now_ms;
 use serde_json::Value;
 use trunk_recorder_plugin::testing;
+use trunk_reporter::api::{rfc3339, router};
+use trunk_reporter::store::calls::{NewCall, call_started};
+use trunk_reporter::store::now_ms;
 
 fn call_ids(v: &Value) -> Vec<i64> {
     v["calls"].as_array().unwrap().iter().map(|c| c["call_id"].as_i64().unwrap()).collect()

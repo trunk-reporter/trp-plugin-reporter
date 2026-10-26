@@ -2,9 +2,9 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::*;
-use reporter::affiliations::Names;
-use reporter::api::rfc3339;
 use serde_json::Value;
+use trunk_reporter::affiliations::Names;
+use trunk_reporter::api::rfc3339;
 
 fn unit_keys(v: &Value) -> Vec<(i64, i64)> {
     v["units"].as_array().unwrap().iter().map(|u| (u["system_id"].as_i64().unwrap(), u["unit_id"].as_i64().unwrap())).collect()

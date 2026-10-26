@@ -41,10 +41,10 @@ It starts with the default settings below and needs no configuration.
 Reporter can serve the history without the recorder running:
 
 ```sh
-reporter serve <data-dir>
+trunk-reporter serve <data-dir>
 ```
 
-The data folder is the plugin's folder, `plugin-data/reporter/` beside TRP's
+The data folder is the plugin's folder, `plugin-data/trunk-reporter/` beside TRP's
 config file (`%APPDATA%\trunk-pro\` on Windows, `~/.config/trunk-pro/` on
 Linux, `~/Library/Application Support/trunk-pro/` on macOS, or beside the file
 given with `--config`). It needs a store from at least one run under TRP. Put
@@ -105,7 +105,7 @@ with TRP's test bench:
 
 ```sh
 cargo build --release
-trunk-pro plugin run target\release\reporter.exe <capture dir> --limit N
+trunk-pro plugin run target\release\trunk-reporter.exe <capture dir> --limit N
 ```
 
 ## License

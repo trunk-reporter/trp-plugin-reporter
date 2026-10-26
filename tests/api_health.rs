@@ -2,10 +2,10 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::*;
-use reporter::api::OUT_OF_SCOPE;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use trunk_reporter::api::OUT_OF_SCOPE;
 
 #[tokio::test]
 async fn health_is_open_and_shaped() {
@@ -134,10 +134,10 @@ async fn every_spec_path_is_served_or_declared_out_of_scope() {
 
 #[test]
 fn the_seed_is_what_its_doc_says() {
-    use reporter::store::calls::{CallFilter, list_calls};
-    use reporter::store::systems::{list_sites, system_by_id};
-    use reporter::store::talkgroups::{talkgroup, talkgroups_by_tgid};
-    use reporter::store::units::{unit, units_by_id};
+    use trunk_reporter::store::calls::{CallFilter, list_calls};
+    use trunk_reporter::store::systems::{list_sites, system_by_id};
+    use trunk_reporter::store::talkgroups::{talkgroup, talkgroups_by_tgid};
+    use trunk_reporter::store::units::{unit, units_by_id};
 
     let (_, store, _, _) = app();
     let seed = seed(&store);

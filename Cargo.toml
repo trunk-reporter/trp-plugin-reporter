@@ -1,12 +1,12 @@
 [package]
 # The plugin's id: it names the executable, the release files and the plugin's
 # entry in the registry.
-name = "reporter"
+name = "trunk-reporter"
 version = "0.1.0"
 edition = "2024"
 description = "Call, unit and talkgroup history with tr-engine's API and pages, stored in SQLite."
 license = "MIT"
-repository = "https://github.com/trunk-reporter/reporter"
+repository = "https://github.com/trunk-reporter/trunk-reporter"
 homepage = "http://127.0.0.1:8092/"
 authors = ["Andrew Miller <snarglefluffer@gmail.com>"]
 rust-version = "1.85"

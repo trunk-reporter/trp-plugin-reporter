@@ -130,12 +130,12 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Bring the store to [`SCHEMA_VERSION`], one version at a time, then apply
-/// `ensure.sql`. A store from a newer reporter is refused, not touched.
+/// `ensure.sql`. A store from a newer trunk-reporter is refused, not touched.
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let has: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')", [], |r| r.get(0))?;
     let found: i64 = if has { conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))? } else { 0 };
     if found > SCHEMA_VERSION {
-        return Err(StoreError(format!("this store was written by a newer reporter (schema {found}); upgrade reporter")));
+        return Err(StoreError(format!("this store was written by a newer trunk-reporter (schema {found}); upgrade trunk-reporter")));
     }
     let tx = conn.unchecked_transaction()?;
     let mut version = found;
@@ -382,7 +382,7 @@ mod tests {
         s.write_sync(|c| c.execute("UPDATE schema_version SET version = 99", [])).unwrap();
         drop(s);
         let err = Store::open(&path).err().unwrap();
-        assert_eq!(err.0, "this store was written by a newer reporter (schema 99); upgrade reporter");
+        assert_eq!(err.0, "this store was written by a newer trunk-reporter (schema 99); upgrade trunk-reporter");
         // Left as it was.
         let c = Connection::open(&path).unwrap();
         assert_eq!(c.query_row("SELECT version FROM schema_version", [], |r| r.get::<_, i64>(0)).unwrap(), 99);

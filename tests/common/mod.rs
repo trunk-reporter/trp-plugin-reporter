@@ -17,15 +17,15 @@ use time::format_description::well_known::Rfc3339;
 use tower::ServiceExt;
 use trunk_recorder_plugin::{CallInfo, CallRecord, FreqEntry, SrcEntry};
 
-use reporter::affiliations::Affiliations;
-use reporter::api::{AppState, HostStatus, router};
-use reporter::bus::Bus;
-use reporter::store::calls::{NewCall, call_concluded, call_ended, call_started};
-use reporter::store::recorder::insert_recorder_state;
-use reporter::store::systems::{Identity, ensure_site, ensure_system, set_identity};
-use reporter::store::talkgroups::{TgTags, touch_talkgroup};
-use reporter::store::units::{NewUnitEvent, insert_unit_event, touch_unit, transmission_events};
-use reporter::store::{CallId, SiteId, Store, SystemId, now_ms};
+use trunk_reporter::affiliations::Affiliations;
+use trunk_reporter::api::{AppState, HostStatus, router};
+use trunk_reporter::bus::Bus;
+use trunk_reporter::store::calls::{NewCall, call_concluded, call_ended, call_started};
+use trunk_reporter::store::recorder::insert_recorder_state;
+use trunk_reporter::store::systems::{Identity, ensure_site, ensure_system, set_identity};
+use trunk_reporter::store::talkgroups::{TgTags, touch_talkgroup};
+use trunk_reporter::store::units::{NewUnitEvent, insert_unit_event, touch_unit, transmission_events};
+use trunk_reporter::store::{CallId, SiteId, Store, SystemId, now_ms};
 
 /// The host name the test app's health reports.
 pub const HOST: &str = "trunk-recorder";

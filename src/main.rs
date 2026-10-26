@@ -1,8 +1,8 @@
-//! The `reporter` executable: picks a mode from the command line and runs it.
+//! The `trunk-reporter` executable: picks a mode from the command line and runs it.
 
 use std::path::{Path, PathBuf};
 
-use reporter::{plugin, server};
+use trunk_reporter::{plugin, server};
 
 /// What the command line asks for.
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub fn mode(args: &[String]) -> Result<Mode, String> {
         Some("--version" | "-V") => Ok(Mode::Version),
         Some("serve") => match args.get(1) {
             Some(dir) => Ok(Mode::Serve { data_dir: dir.into() }),
-            None => Err("serve needs a data folder: reporter serve <data dir>".into()),
+            None => Err("serve needs a data folder: trunk-reporter serve <data dir>".into()),
         },
         Some(a) => Err(format!("unknown argument {a} (use --describe, --version or serve <data dir>)")),
     }

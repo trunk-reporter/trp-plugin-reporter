@@ -14,7 +14,7 @@ First release (phase 1).
 - Backfill: on first start the capture folder's recorded calls are loaded;
   an interrupted backfill resumes on the next start.
 - Retention: "Keep history for (days)" prunes old history; 0 keeps everything.
-- Serve mode: `reporter serve <data-dir>` serves the stored history without the
+- Serve mode: `trunk-reporter serve <data-dir>` serves the stored history without the
   recorder.
 - Targets Trunk Recorder Pro plugin SDK 0.5. A later release moves to SDK 0.7
   for what 0.5 lacks (system names and sites from `hello`).
