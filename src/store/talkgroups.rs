@@ -302,6 +302,27 @@ pub fn list_talkgroups(conn: &Connection, f: &TalkgroupFilter, now_ms: i64) -> r
     Ok((rows, total))
 }
 
+/// Talkgroups first heard at or after `since_ms` (on `system_ids`, or any system when empty),
+/// newest first, at most `limit`, with statistics as of `now_ms`.
+pub fn first_heard_talkgroups(conn: &Connection, system_ids: &[i64], since_ms: i64, limit: u32, now_ms: i64) -> rusqlite::Result<Vec<TalkgroupRow>> {
+    let mut conds = vec!["first_heard_ms >= ?1".to_string()];
+    let mut params = vec![Value::Integer(since_ms)];
+    push_in(&mut conds, &mut params, "system_id ", "", system_ids);
+    params.push(Value::Integer(limit.into()));
+    let sql = format!(
+        "SELECT {TG_COLS}, 0, 0, 0, 0, NULL FROM talkgroups WHERE {} ORDER BY first_heard_ms DESC, tgid DESC, system_id LIMIT ?{}",
+        conds.join(" AND "),
+        params.len()
+    );
+    let mut rows = conn.prepare_cached(&sql)?.query_map(params_from_iter(params.iter()), talkgroup_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &mut rows {
+        if let Some(full) = talkgroup(conn, row.system_id, row.tgid, now_ms)? {
+            (row.call_count_30d, row.calls_1h, row.calls_24h, row.unit_count_30d) = (full.call_count_30d, full.calls_1h, full.calls_24h, full.unit_count_30d);
+        }
+    }
+    Ok(rows)
+}
+
 /// A unit on a talkgroup: its row, its calls there in the window, and when it was first heard there (ms).
 pub type TalkgroupUnit = (UnitRow, i64, i64);
 

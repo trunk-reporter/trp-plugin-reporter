@@ -381,6 +381,14 @@ pub struct UnitListResponse {
     pub offset: u32,
 }
 
+/// The spec's `FirstHeardResponse`: the talkgroups and radios first heard since `since`.
+#[derive(Serialize)]
+pub struct FirstHeardResponse {
+    pub since: String,
+    pub talkgroups: Vec<Talkgroup>,
+    pub units: Vec<Unit>,
+}
+
 /// The spec's `UnitEvent`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnitEvent {

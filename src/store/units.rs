@@ -133,6 +133,17 @@ pub(super) fn like_escape(text: &str) -> String {
 }
 
 /// The page of units the filter matches, and how many match in all.
+/// Units first seen at or after `since_ms` (on `system_ids`, or any system when empty), newest first, at most `limit`.
+pub fn first_heard_units(conn: &Connection, system_ids: &[i64], since_ms: i64, limit: u32) -> rusqlite::Result<Vec<UnitRow>> {
+    let mut conds = vec!["first_seen_ms >= ?1".to_string()];
+    let mut params = vec![Value::Integer(since_ms)];
+    push_in(&mut conds, &mut params, "system_id ", "", system_ids);
+    params.push(Value::Integer(limit.into()));
+    let sql =
+        format!("SELECT {UNIT_COLS} FROM units WHERE {} ORDER BY first_seen_ms DESC, unit_id DESC, system_id LIMIT ?{}", conds.join(" AND "), params.len());
+    conn.prepare_cached(&sql)?.query_map(params_from_iter(params.iter()), unit_row)?.collect()
+}
+
 pub fn list_units(conn: &Connection, f: &UnitFilter, now_ms: i64) -> rusqlite::Result<(Vec<UnitRow>, i64)> {
     let mut conds: Vec<String> = Vec::new();
     let mut params: Vec<Value> = Vec::new();

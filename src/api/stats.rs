@@ -1,4 +1,4 @@
-//! `/stats`, `/stats/rates` and `/recorders`.
+//! `/stats`, `/stats/rates`, `/recorders` and `/first-heard`.
 
 use std::collections::HashMap;
 
@@ -7,13 +7,15 @@ use axum::extract::{Query as QueryParams, State};
 
 use super::talkgroups::{blocking, system_filter, systems};
 use super::types::{
-    ActivityBucket, DecodeRate, DecodeRatesResponse, Recorder, RecorderListResponse, StatsResponse, SystemActivity, TalkgroupActivity,
-    TalkgroupActivityResponse,
+    ActivityBucket, DecodeRate, DecodeRatesResponse, FirstHeardResponse, Recorder, RecorderListResponse, StatsResponse, SystemActivity, Talkgroup,
+    TalkgroupActivity, TalkgroupActivityResponse, Unit,
 };
-use super::{ApiError, AppState, Query, ids, pagination, sort, time_range, window};
+use super::{ApiError, AppState, Query, ids, pagination, param, rfc3339, sort, time_param, time_range, window};
 use crate::store::recorder::{decode_rates, first_state_ms, latest_recorder_state};
 use crate::store::stats::{ActivityFilter, activity_buckets, activity_talkgroups, stats as stats_row, system_activity, talkgroup_activity as activity_rows};
 use crate::store::systems::{site_by_id, system_by_id};
+use crate::store::talkgroups::{first_heard_talkgroups, tg_alpha_tag};
+use crate::store::units::first_heard_units;
 use crate::store::{StoreError, now_ms};
 
 const DEFAULT_RATES: u32 = 1000;
@@ -169,6 +171,47 @@ pub async fn talkgroup_activity(State(state): State<AppState>, QueryParams(q): Q
             })
             .collect();
         Ok(TalkgroupActivityResponse { activity, total })
+    })
+    .await?;
+    Ok(Json(body))
+}
+
+const DEFAULT_FIRST_HEARD: u32 = 50;
+const MAX_FIRST_HEARD: u32 = 500;
+
+/// `GET /first-heard`: the talkgroups and radios first heard since `since` (default: 24 hours ago), newest first.
+pub async fn first_heard(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<FirstHeardResponse>, ApiError> {
+    let now = now_ms();
+    let since = time_param(&q, "since")?.unwrap_or(now - DAY_MS);
+    let limit = match param(&q, "limit") {
+        None => DEFAULT_FIRST_HEARD,
+        Some(v) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|l| *l >= 1)
+            .map(|l| l.min(MAX_FIRST_HEARD))
+            .ok_or_else(|| ApiError::InvalidParameter(format!("limit must be 1 or more, not {v}")))?,
+    };
+    let body = blocking(&state, move |c| {
+        let systems = systems(c)?;
+        let system_ids = system_filter(&q, &systems);
+        let talkgroups = first_heard_talkgroups(c, &system_ids, since, limit, now)
+            .map_err(StoreError::from)?
+            .iter()
+            .map(|r| Talkgroup::from_rows(r, systems.get(&r.system_id.0)))
+            .collect();
+        let units = first_heard_units(c, &system_ids, since, limit)
+            .map_err(StoreError::from)?
+            .iter()
+            .map(|r| {
+                let tag = match r.last_event_tgid {
+                    Some(t) => tg_alpha_tag(c, r.system_id, t).map_err(StoreError::from)?,
+                    None => None,
+                };
+                Ok(Unit::from_rows(r, systems.get(&r.system_id.0), tag, None))
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
+        Ok(FirstHeardResponse { since: rfc3339(since), talkgroups, units })
     })
     .await?;
     Ok(Json(body))

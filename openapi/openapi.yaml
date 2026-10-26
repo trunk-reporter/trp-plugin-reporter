@@ -2759,6 +2759,48 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /first-heard:
+    get:
+      operationId: getFirstHeard
+      summary: Talkgroups and radios first heard recently
+      description: |
+        Returns the talkgroups and the units whose first sighting is at or after
+        `since`, each list newest first and capped at `limit`. A talkgroup's or
+        unit's `first_seen` is the time it was first heard.
+      tags: [stats]
+      parameters:
+        - name: since
+          in: query
+          description: Earliest first sighting to list (RFC 3339). Defaults to 24 hours ago.
+          schema:
+            type: string
+            format: date-time
+        - name: system_id
+          in: query
+          description: Filter by system ID(s). Comma-separated for multiple.
+          schema:
+            type: string
+            example: "1"
+        - name: limit
+          in: query
+          description: Maximum number of entries in each list (1-500, default 50)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirstHeardResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /stats/talkgroup-activity:
     get:
       operationId: getTalkgroupActivity
@@ -6261,6 +6303,41 @@ components:
         offset:
           type: integer
           example: 0
+
+    FirstHeardResponse:
+      type: object
+      required: [since, talkgroups, units]
+      properties:
+        since:
+          type: string
+          format: date-time
+          description: The earliest first sighting listed
+        talkgroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/Talkgroup"
+        units:
+          type: array
+          items:
+            $ref: "#/components/schemas/Unit"
+      example:
+        since: "2026-10-24T14:00:00.000Z"
+        talkgroups:
+          - system_id: 1
+            system_name: "Butler/Warren P25"
+            sysid: "348"
+            tgid: 9178
+            alpha_tag: "09-8L Main"
+            first_seen: "2026-10-25T09:12:40.000Z"
+            last_seen: "2026-10-25T13:58:02.000Z"
+        units:
+          - system_id: 1
+            system_name: "Butler/Warren P25"
+            sysid: "348"
+            unit_id: 1234567
+            alpha_tag: "Engine 1"
+            first_seen: "2026-10-25T11:30:05.000Z"
+            last_seen: "2026-10-25T13:59:41.000Z"
 
     UnitListResponse:
       type: object

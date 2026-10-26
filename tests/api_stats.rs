@@ -296,3 +296,72 @@ async fn a_bad_interval_is_a_400() {
         assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")), "{interval}");
     }
 }
+
+fn first_heard_keys(v: &Value, list: &str, id: &str) -> Vec<(i64, i64)> {
+    v[list].as_array().unwrap().iter().map(|t| (t["system_id"].as_i64().unwrap(), t[id].as_i64().unwrap())).collect()
+}
+
+#[tokio::test]
+async fn first_heard_lists_new_talkgroups_and_units_newest_first() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+
+    let since = rfc3339(s.now - 4 * DAY);
+    let (st, v) = get(&app, &format!("/api/v1/first-heard?since={since}")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "FirstHeardResponse");
+    assert_eq!(v["since"], since);
+    // 202 (40 days ago) is older than the window; 9178 on system 2 is the newest.
+    assert_eq!(first_heard_keys(&v, "talkgroups", "tgid"), vec![(s.sys2.0, 9178), (s.sys1.0, 9178), (s.sys1.0, 101)]);
+    let t = &v["talkgroups"][0];
+    assert_schema(t, "Talkgroup");
+    assert_eq!((t["alpha_tag"].as_str(), t["first_seen"].as_str()), (Some("Mutual Aid"), Some(rfc3339(s.now - DAY).as_str())));
+    let units = first_heard_keys(&v, "units", "unit_id");
+    assert!(units.windows(2).all(|w| w[0] != w[1]));
+    for u in v["units"].as_array().unwrap() {
+        assert_schema(u, "Unit");
+    }
+    let times: Vec<&str> = v["units"].as_array().unwrap().iter().map(|u| u["first_seen"].as_str().unwrap()).collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "{times:?}");
+    // Unit 10 was first heard 40 days ago; 20 three days ago; 30 and 1234 (both systems) since.
+    assert!(!units.contains(&(s.sys1.0, 10)));
+    assert!(units.contains(&(s.sys1.0, 20)) && units.contains(&(s.sys1.0, 30)) && units.contains(&(s.sys2.0, 1234)) && units.contains(&(s.sys1.0, 1234)));
+    assert_eq!(units.last(), Some(&(s.sys1.0, 20)));
+
+    // A system filter narrows both lists.
+    let (_, v) = get(&app, &format!("/api/v1/first-heard?since={since}&system_id={}", s.sys2.0)).await;
+    assert_eq!(first_heard_keys(&v, "talkgroups", "tgid"), vec![(s.sys2.0, 9178)]);
+    assert_eq!(first_heard_keys(&v, "units", "unit_id"), vec![(s.sys2.0, 1234)]);
+
+    // The limit applies to each list.
+    let (_, v) = get(&app, &format!("/api/v1/first-heard?since={since}&limit=1")).await;
+    assert_eq!((v["talkgroups"].as_array().unwrap().len(), v["units"].as_array().unwrap().len()), (1, 1));
+}
+
+#[tokio::test]
+async fn first_heard_since_bounds_both_lists() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+
+    let (_, v) = get(&app, &format!("/api/v1/first-heard?since={}", rfc3339(s.now - 36 * HOUR))).await;
+    assert_eq!(first_heard_keys(&v, "talkgroups", "tgid"), vec![(s.sys2.0, 9178)]);
+    assert!(!first_heard_keys(&v, "units", "unit_id").contains(&(s.sys1.0, 20)));
+
+    let (_, v) = get(&app, &format!("/api/v1/first-heard?since={}", rfc3339(s.now + HOUR))).await;
+    assert_schema(&v, "FirstHeardResponse");
+    assert_eq!((v["talkgroups"].as_array().unwrap().len(), v["units"].as_array().unwrap().len()), (0, 0));
+
+    // Without `since` the window is the last 24 hours, which the seed's older talkgroups miss.
+    let (st, v) = get(&app, "/api/v1/first-heard").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(v["talkgroups"].as_array().unwrap().is_empty());
+    let since = v["since"].as_str().unwrap();
+    assert!(since > rfc3339(s.now - DAY - MIN).as_str() && since < rfc3339(s.now - DAY + MIN).as_str(), "{since}");
+
+    for bad in ["limit=0", "limit=x", "since=yesterday"] {
+        let (st, v) = get(&app, &format!("/api/v1/first-heard?{bad}")).await;
+        assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")), "{bad}");
+    }
+    let (st, _) = get(&app, "/api/v1/first-heard?limit=100000").await;
+    assert_eq!(st, StatusCode::OK);
+}

@@ -185,6 +185,7 @@ pub const SERVED_PREFIXES: &[&str] = &[
     "calls",
     "stats",
     "recorders",
+    "first-heard",
     "events",
     "pages",
     "openapi.yaml",
@@ -221,6 +222,7 @@ pub fn router(state: AppState) -> Router {
         .route("/stats/rates", get(stats::rates))
         .route("/stats/talkgroup-activity", get(stats::talkgroup_activity))
         .route("/recorders", get(stats::recorders))
+        .route("/first-heard", get(stats::first_heard))
         .route("/events/stream", get(sse::stream))
         .route("/calls", get(calls::list))
         .route("/calls/active", get(calls::active))
