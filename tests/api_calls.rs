@@ -295,3 +295,42 @@ async fn talkgroup_and_unit_call_lists_work() {
     let (st, _) = get(&app, "/api/v1/talkgroups/1:5555/calls").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+/// The calendar heatmap and daily overview ask for `limit=50000`; tr-engine
+/// answers with its maximum page rather than a 400, and so do we.
+#[tokio::test]
+async fn an_oversized_limit_is_the_maximum_page() {
+    let (app, ..) = app();
+    let (st, v) = get(&app, "/api/v1/calls?limit=50000").await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["limit"], 1000, "{v}");
+}
+
+/// The plugin transcribes nothing. tr-engine's IRC page asks for a batch of
+/// transcriptions and, if that fails, one per call: "none" has to be an answer,
+/// not a 501.
+#[tokio::test]
+async fn transcriptions_are_none_not_unimplemented() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    let id = s.calls[0].0;
+
+    let (st, v) = get(&app, &format!("/api/v1/calls/{id}/transcription")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["code"], "not_found");
+    assert_schema(&v, "Error");
+    let (st, _) = get(&app, "/api/v1/calls/999999/transcription").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let (st, v) = get(&app, &format!("/api/v1/transcriptions/batch?call_ids={id},{}", s.calls[1].0)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_schema(&v, "BatchTranscriptionResponse");
+    assert_eq!(v["transcriptions"].as_array().map(Vec::len), Some(0));
+    for bad in ["/api/v1/transcriptions/batch", "/api/v1/transcriptions/batch?call_ids=1,x"] {
+        assert_eq!(get(&app, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // Writing one is still out of scope.
+    let (st, _) = request(&app, axum::http::Method::PUT, &format!("/api/v1/calls/{id}/transcription")).await;
+    assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+}

@@ -1,0 +1,2698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="auth.js?v=1"></script>
+<meta name="card-title" content="OmniTrunker">
+<meta name="card-description" content="Live voice channels and unit activity feed">
+<meta name="card-order" content="3">
+<title>OmniTrunker — tr-engine</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;700&family=Outfit:wght@200;300;400;500;600;700;800;900&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@300;400;500;600;700;800&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Karla:wght@200;300;400;500&family=Syne:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&family=VT323&family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet">
+
+<script src="theme-config.js"></script>
+
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-mono);
+    font-weight: var(--font-weight-body);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: background 0.5s, color 0.4s;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: var(--grid-bg);
+    background-size: var(--grid-size) var(--grid-size);
+    pointer-events: none; z-index: 0;
+  }
+  body::after {
+    content: ''; position: fixed; inset: 0;
+    background: var(--scanlines);
+    pointer-events: none; z-index: 9999;
+  }
+  .vignette-overlay {
+    position: fixed; inset: 0;
+    background: var(--vignette);
+    pointer-events: none; z-index: 9998;
+    transition: background 0.6s;
+  }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    position: relative; z-index: 2;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    transition: background 0.5s, border-color 0.4s;
+  }
+
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .status-dot.disconnected { background: var(--danger); }
+  .status-dot.connecting { background: var(--warning); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .toolbar select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 3px 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .toolbar select:focus { outline: none; border-color: var(--accent); }
+
+  .stats { margin-left: auto; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+  /* ── Panels ── */
+  .panels {
+    position: relative; z-index: 1;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .panel-top {
+    flex: 0 0 auto;
+    height: 21vh;
+    min-height: 80px;
+  }
+
+  .panel-divider {
+    height: 5px;
+    cursor: row-resize;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  .panel-divider:hover, .panel-divider.dragging {
+    background: var(--accent);
+  }
+
+  .panel-bottom {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .panel-header {
+    padding: 6px 16px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--accent);
+    font-weight: 600;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    background: color-mix(in srgb, var(--bg) 95%, transparent);
+    flex-shrink: 0;
+  }
+
+  .panel-scroll {
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* ── Controls Bar ── */
+  .controls-bar {
+    padding: 4px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    background: color-mix(in srgb, var(--bg) 95%, transparent);
+    flex-shrink: 0;
+  }
+  .controls-bar label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: var(--text-muted); white-space: nowrap;
+  }
+  .controls-bar select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 2px 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .controls-bar select:focus { outline: none; border-color: var(--accent); }
+  .controls-bar input[type="checkbox"] { accent-color: var(--accent); }
+  .controls-bar button {
+    background: var(--bg-tile);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 2px 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .controls-bar button:hover { background: var(--bg-surface); border-color: var(--border-hover); }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: color-mix(in srgb, var(--bg) 97%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    padding: 4px 8px;
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    z-index: 2;
+  }
+  td {
+    padding: 3px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+  }
+  tr:hover td { background: var(--bg-surface); }
+
+  /* ── Channel table column widths ── */
+  #channels-table th:nth-child(1), #channels-table td:nth-child(1) { width: 4%; text-align: center; overflow: visible; }
+  #channels-table th:nth-child(2), #channels-table td:nth-child(2) { width: 4%; text-align: center; overflow: visible; }
+  #channels-table th:nth-child(3), #channels-table td:nth-child(3) { width: 12%; }
+  #channels-table th:nth-child(4), #channels-table td:nth-child(4) { width: 8%; }
+  #channels-table th:nth-child(5), #channels-table td:nth-child(5) { width: 6%; }
+  #channels-table th:nth-child(6), #channels-table td:nth-child(6) { width: 17%; }
+  #channels-table th:nth-child(7), #channels-table td:nth-child(7) { width: 7%; }
+  #channels-table th:nth-child(8), #channels-table td:nth-child(8) { width: 14%; }
+  #channels-table th:nth-child(9), #channels-table td:nth-child(9) { width: 6%; }
+  #channels-table th:nth-child(10), #channels-table td:nth-child(10) { width: 7%; }
+  #channels-table th:nth-child(11), #channels-table td:nth-child(11) { width: 9%; }
+
+  /* ── Activity table column widths ── */
+  #activity-table th:nth-child(1), #activity-table td:nth-child(1) { width: 8%; }
+  #activity-table th:nth-child(2), #activity-table td:nth-child(2) { width: 12%; }
+  #activity-table th:nth-child(3), #activity-table td:nth-child(3) { width: 8%; }
+  #activity-table th:nth-child(4), #activity-table td:nth-child(4) { width: 8%; }
+  #activity-table th:nth-child(5), #activity-table td:nth-child(5) { width: 14%; }
+  #activity-table th:nth-child(6), #activity-table td:nth-child(6) { width: 12%; }
+  #activity-table th:nth-child(7), #activity-table td:nth-child(7) { width: 8%; }
+  #activity-table th:nth-child(8), #activity-table td:nth-child(8) { width: 16%; }
+
+  /* ── Channel Row States ── */
+  .channel-row { transition: opacity 5s ease-out; }
+  .channel-row.fading { opacity: 0; }
+  .channel-row.channel-idle { opacity: 0.4; transition: opacity 0.3s ease-out; }
+  .channel-row.channel-idle:hover { opacity: 0.65; }
+  .channel-row.emergency { border-left: 3px solid var(--danger); }
+  .channel-row.emergency td:first-child { padding-left: 5px; }
+
+  /* ── Badges ── */
+  .badge {
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    text-align: center;
+    display: inline-block;
+    min-width: 90px;
+  }
+  .badge-grant { background: color-mix(in srgb, var(--info) 20%, transparent); color: var(--info); }
+  .badge-affiliation { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }
+  .badge-registration { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+  .badge-deregistration { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
+  .badge-acknowledge { background: color-mix(in srgb, var(--magenta) 20%, transparent); color: var(--magenta); }
+  .badge-data { background: var(--bg-tile); color: var(--text-muted); }
+  .badge-location { background: color-mix(in srgb, var(--cyan) 20%, transparent); color: var(--cyan); }
+  .badge-call-end { background: var(--bg-tile); color: var(--text-faint); }
+  .badge-signal { background: color-mix(in srgb, var(--magenta) 15%, transparent); color: var(--magenta); }
+  .badge-call-alert { background: color-mix(in srgb, #cc2200 25%, transparent); color: #ff4422; font-weight: 700; }
+
+  .encrypted-badge {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: var(--radius-xs);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    background: color-mix(in srgb, var(--danger) 25%, transparent);
+    color: var(--danger);
+  }
+
+  .val { color: var(--accent); }
+  .dim { color: var(--text-muted); }
+
+  .empty-state {
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  .credit {
+    padding: 4px 16px;
+    font-size: 10px;
+    color: var(--text-faint);
+    text-align: right;
+  }
+  .credit a { color: var(--text-muted); text-decoration: none; }
+  .credit a:hover { color: var(--accent); text-decoration: underline; }
+
+  /* ── Listen Toggle ── */
+  .listen-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: 1px solid var(--text-faint);
+    color: var(--text-faint);
+    padding: 3px 12px;
+    border-radius: 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .listen-toggle .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-faint);
+    transition: background 0.2s;
+  }
+  .listen-toggle.active {
+    border-color: var(--success);
+    color: var(--success);
+  }
+  .listen-toggle.active .dot {
+    background: var(--success);
+    animation: pulse 1.5s infinite;
+  }
+  .listen-toggle.resume-hint {
+    border-color: var(--warning, #f0a020);
+    color: var(--warning, #f0a020);
+    animation: resume-pulse 1.2s ease-in-out infinite;
+  }
+  .listen-toggle.resume-hint .dot {
+    background: var(--warning, #f0a020);
+  }
+  @keyframes resume-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  /* ── Audio Controls ── */
+  .audio-controls {
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+  .audio-controls.visible { display: flex; }
+
+  .vol-slider {
+    width: 60px; height: 3px;
+    -webkit-appearance: none; appearance: none;
+    background: var(--border); border-radius: 2px; outline: none;
+  }
+  .vol-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
+    background: var(--accent); border-radius: 50%; cursor: pointer;
+  }
+  .vol-slider::-moz-range-thumb {
+    width: 12px; height: 12px;
+    background: var(--accent); border-radius: 50%; cursor: pointer; border: none;
+  }
+
+  .audio-status {
+    font-size: 10px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+  .audio-status.streaming { color: var(--success); }
+
+  /* ── Speaker Icon Column ── */
+  .spk-btn {
+    background: none; border: none; cursor: pointer;
+    font-size: 14px; padding: 0 2px; line-height: 1;
+    color: var(--text-muted);
+    transition: color 0.15s, opacity 0.15s;
+  }
+  .spk-btn:hover { color: var(--accent); }
+  .spk-btn.muted { opacity: 0.35; }
+
+  /* ── Pan Indicator ── */
+  .pan-indicator {
+    display: inline-block;
+    width: 33px; height: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    position: relative;
+    vertical-align: middle;
+  }
+  .pan-indicator .pan-dot {
+    position: absolute;
+    top: 0px;
+    width: 4px; height: 4px;
+    background: var(--accent);
+    border-radius: 50%;
+    transition: left 0.2s ease;
+  }
+  .pan-indicator .pan-center {
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 50%;
+    width: 1px;
+    background: var(--border);
+  }
+
+  /* ── Audio Glow on Active Rows ── */
+  .channel-row.audio-active {
+    background: color-mix(in srgb, var(--success) 10%, transparent);
+  }
+  .channel-row.audio-active td:first-child {
+    box-shadow: inset 3px 0 0 var(--success);
+  }
+
+  /* ── Theme Label ── */
+  .theme-label {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 10000; font-family: var(--font-display); font-size: 12px;
+    letter-spacing: 3px; text-transform: uppercase; color: var(--accent);
+    background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border); padding: 10px 24px; border-radius: 100px;
+    transition: all 0.5s; pointer-events: none; opacity: 0;
+  }
+  .theme-label.show { opacity: 1; }
+
+  /* ── Settings Drawer ── */
+  .settings-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+  }
+  .settings-overlay.open { display: block; }
+  .settings-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 85vw);
+    background: var(--bg-surface);
+    z-index: 101;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .settings-panel.open { transform: translateX(0); }
+
+  .settings-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    gap: 10px;
+  }
+  .settings-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    flex: 1;
+  }
+  .settings-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    cursor: pointer;
+    padding: 4px;
+  }
+  .settings-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .settings-scroll::-webkit-scrollbar { width: 4px; }
+  .settings-scroll::-webkit-scrollbar-track { background: transparent; }
+  .settings-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .settings-group {
+    margin-bottom: 20px;
+  }
+  .settings-group-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+    margin-bottom: 10px;
+  }
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  }
+  .settings-label { font-size: 14px; color: var(--text); }
+  .settings-sublabel { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+
+  /* Toggle switch */
+  .toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    flex-shrink: 0;
+  }
+  .toggle input { display: none; }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .toggle input:checked + .toggle-track { background: var(--accent); }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: transform 0.2s;
+    pointer-events: none;
+  }
+  .toggle input:checked ~ .toggle-thumb { transform: translateX(20px); }
+
+  /* ── Gear Button ── */
+  .gear-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: var(--radius-xs);
+    transition: color 0.15s, border-color 0.15s;
+    line-height: 1;
+  }
+  .gear-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ── View Toggle ── */
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    overflow: hidden;
+  }
+  .view-btn {
+    background: var(--bg);
+    color: var(--text-muted);
+    border: none;
+    padding: 3px 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .view-btn:not(:last-child) { border-right: 1px solid var(--border); }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.active { background: var(--accent); color: #fff; }
+
+  /* ── TG Selection List ── */
+  .tg-search {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .tg-search:focus { outline: none; border-color: var(--accent); }
+  .tg-search::placeholder { color: var(--text-faint); }
+
+  .tg-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .tg-actions button {
+    flex: 1;
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .tg-actions button:hover { background: var(--bg-surface); border-color: var(--border-hover); }
+
+  .tg-list {
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: var(--bg);
+  }
+  .tg-list::-webkit-scrollbar { width: 4px; }
+  .tg-list::-webkit-scrollbar-track { background: transparent; }
+  .tg-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .tg-system-header {
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--bg) 95%, transparent);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .tg-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent);
+  }
+  .tg-item:hover { background: var(--bg-surface); }
+  .tg-item input[type="checkbox"] { accent-color: var(--accent); flex-shrink: 0; }
+  .tg-item-tgid { font-size: 12px; color: var(--accent); min-width: 48px; }
+  .tg-item-tag { font-size: 12px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tg-count { font-size: 11px; color: var(--text-faint); margin-bottom: 6px; }
+
+  /* ── Column Visibility ── */
+  .hide-col-channel #channels-table th:nth-child(4), .hide-col-channel #channels-table td:nth-child(4) { display: none; }
+  .hide-col-source #channels-table th:nth-child(7), .hide-col-source #channels-table td:nth-child(7) { display: none; }
+  .hide-col-unit-alias #channels-table th:nth-child(8), .hide-col-unit-alias #channels-table td:nth-child(8) { display: none; }
+  .hide-col-mode #channels-table th:nth-child(10), .hide-col-mode #channels-table td:nth-child(10) { display: none; }
+  .hide-col-encryption #channels-table th:nth-child(11), .hide-col-encryption #channels-table td:nth-child(11) { display: none; }
+
+  /* ── Volume slider in settings ── */
+  .settings-vol-slider {
+    width: 120px; height: 3px;
+    -webkit-appearance: none; appearance: none;
+    background: var(--border); border-radius: 2px; outline: none;
+  }
+  .settings-vol-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    background: var(--accent); border-radius: 50%; cursor: pointer;
+  }
+  .settings-vol-slider::-moz-range-thumb {
+    width: 14px; height: 14px;
+    background: var(--accent); border-radius: 50%; cursor: pointer; border: none;
+  }
+
+  /* ── Multi-Select Dropdown ── */
+  .multiselect {
+    position: relative;
+    display: inline-block;
+  }
+  .multiselect-btn {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 3px 22px 3px 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    appearance: none;
+    position: relative;
+  }
+  .multiselect-btn::after {
+    content: '▾';
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+  .multiselect-btn:hover, .multiselect-btn:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+  }
+  .multiselect-btn.open {
+    border-color: var(--accent);
+  }
+  .controls-bar .multiselect-btn {
+    padding: 2px 20px 2px 6px;
+    font-size: 11px;
+  }
+  .multiselect-list {
+    display: none;
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    min-width: 160px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    z-index: 100;
+    padding: 4px 0;
+  }
+  .multiselect-list.open { display: block; }
+  .multiselect-actions {
+    display: flex;
+    gap: 4px;
+    padding: 2px 8px 4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    margin-bottom: 2px;
+  }
+  .multiselect-actions button {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: var(--radius-xs);
+  }
+  .multiselect-actions button:hover {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .multiselect-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .multiselect-item:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .multiselect-item input[type="checkbox"] {
+    accent-color: var(--accent);
+    margin: 0;
+    cursor: pointer;
+  }
+  .controls-bar .multiselect-item { font-size: 11px; }
+
+  /* ── Mobile ── */
+  @media (max-width: 600px) {
+    .toolbar {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      padding: 8px 12px;
+    }
+    .stats { margin-left: 0; font-size: 11px; }
+    .controls-bar { gap: 8px; padding: 4px 12px; }
+    th, td { padding: 3px 4px; font-size: 11px; }
+    .badge { min-width: 70px; font-size: 10px; }
+    /* Hide Speaker, Mode and Encryption columns in Active Voice Channels */
+    #channels-table th:nth-child(1),
+    #channels-table td:nth-child(1),
+    #channels-table th:nth-child(9),
+    #channels-table td:nth-child(9),
+    #channels-table th:nth-child(10),
+    #channels-table td:nth-child(10) { display: none; }
+    /* Hide Site column in Unit Activity */
+    #activity-table th:nth-child(3),
+    #activity-table td:nth-child(3) { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="vignette-overlay"></div>
+
+<div class="toolbar">
+  <div class="status">
+    <div id="status-dot" class="status-dot connecting"></div>
+    <span id="status-text">connecting...</span>
+  </div>
+  <div id="system-filter-container"></div>
+  <div class="view-toggle" id="view-toggle">
+    <button class="view-btn active" data-view="talkgroup">TG</button>
+    <button class="view-btn" data-view="frequency">FREQ</button>
+  </div>
+  <button class="listen-toggle" id="listen-toggle">
+    <span class="dot"></span>
+    <span id="listen-label">LISTEN</span>
+  </button>
+  <div class="audio-controls" id="audio-controls">
+    <input type="range" class="vol-slider" id="master-vol" min="0" max="100" value="80" title="Volume">
+    <label style="font-size:10px;color:var(--text-muted);display:flex;align-items:center;gap:3px;cursor:pointer" title="Auto-spread channels across stereo field">
+      <input type="checkbox" id="auto-pan-toggle" checked style="margin:0"> Pan
+    </label>
+    <span class="audio-status" id="audio-status">--</span>
+  </div>
+  <button class="gear-btn" id="settings-btn" title="Settings">&#9881;</button>
+  <div class="stats"><span id="event-count">0</span> events</div>
+  <div class="stats" style="opacity:0.6;font-size:10px;color:var(--text-muted)" title="Page version">v16</div>
+</div>
+
+<div class="panels">
+  <!-- Top: Active Voice Channels -->
+  <div class="panel panel-top">
+    <div class="panel-header" id="channels-header">Active Voice Channels</div>
+    <div class="panel-scroll">
+      <table id="channels-table">
+        <thead>
+          <tr>
+            <th title="Audio"></th>
+            <th title="Pan">L/R</th>
+            <th>System</th>
+            <th>Channel</th>
+            <th>TG</th>
+            <th>Alpha Tag</th>
+            <th>Source</th>
+            <th>Unit Alias</th>
+            <th>Elapsed</th>
+            <th>Mode</th>
+            <th>Encryption</th>
+          </tr>
+        </thead>
+        <tbody id="channels-body">
+          <tr id="channels-empty"><td colspan="11" class="empty-state">Waiting for active calls...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel-divider" id="panel-divider"></div>
+
+  <!-- Bottom: Unit Activity Feed -->
+  <div class="panel panel-bottom">
+    <div class="panel-header">Unit Activity</div>
+    <div class="controls-bar">
+      <label>Buffer: <select id="buffer-size">
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="200" selected>200</option>
+        <option value="500">500</option>
+      </select></label>
+      <label>Type: <span id="type-filter-container"></span></label>
+      <label><input type="checkbox" id="auto-scroll" checked> Auto-scroll</label>
+      <button id="clear-btn">Clear</button>
+    </div>
+    <div class="panel-scroll" id="activity-scroll">
+      <table id="activity-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>System</th>
+            <th>Site</th>
+            <th>Unit ID</th>
+            <th>Unit Alias</th>
+            <th>Type</th>
+            <th>TG</th>
+            <th>TG Alpha</th>
+          </tr>
+        </thead>
+        <tbody id="activity-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="credit">Shamelessly ripped off: <a href="https://github.com/taclane/tr-web" target="_blank" rel="noopener">taclane/tr-web</a> &amp; <a href="https://www.unitrunker.com/" target="_blank" rel="noopener">UniTrunker</a></div>
+</div>
+
+<div class="settings-overlay" id="settings-overlay"></div>
+<div class="settings-panel" id="settings-panel">
+  <div class="settings-header">
+    <div class="settings-title">Settings</div>
+    <button class="settings-close" id="settings-close">&times;</button>
+  </div>
+  <div class="settings-scroll">
+    <div class="settings-group">
+      <div class="settings-group-title">Talkgroup Selection</div>
+      <input type="text" class="tg-search" id="tg-search" placeholder="Search by TGID or alpha tag...">
+      <div class="tg-actions">
+        <button id="tg-select-all">Select All</button>
+        <button id="tg-select-none">Select None</button>
+      </div>
+      <div class="tg-count" id="tg-count">0 selected</div>
+      <div class="tg-list" id="tg-list"></div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-group-title">Audio</div>
+      <div class="settings-row">
+        <div class="settings-label">Master Volume</div>
+        <input type="range" class="settings-vol-slider" id="set-volume" min="0" max="100" value="80">
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-label">Auto-pan</div>
+          <div class="settings-sublabel">Spread channels across stereo field</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="set-auto-pan" checked>
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-group-title">Display</div>
+      <div class="settings-row">
+        <div class="settings-label">Show Channel column</div>
+        <label class="toggle">
+          <input type="checkbox" id="col-channel" checked data-col="channel">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div class="settings-label">Show Source column</div>
+        <label class="toggle">
+          <input type="checkbox" id="col-source" checked data-col="source">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div class="settings-label">Show Unit Alias column</div>
+        <label class="toggle">
+          <input type="checkbox" id="col-unit-alias" checked data-col="unit-alias">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div class="settings-label">Show Mode column</div>
+        <label class="toggle">
+          <input type="checkbox" id="col-mode" checked data-col="mode">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div class="settings-label">Show Encryption column</div>
+        <label class="toggle">
+          <input type="checkbox" id="col-encryption" checked data-col="encryption">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-label">Activity feed max rows</div>
+        </div>
+        <select id="set-buffer-size" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-xs);padding:3px 8px;font-family:var(--font-mono);font-size:12px;">
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="theme-label" id="themeLabel"></div>
+
+<script>
+// ── DOM refs ──
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const eventCountEl = document.getElementById('event-count');
+const channelsBody = document.getElementById('channels-body');
+const channelsEmpty = document.getElementById('channels-empty');
+const activityBody = document.getElementById('activity-body');
+const activityScroll = document.getElementById('activity-scroll');
+const bufferSizeSelect = document.getElementById('buffer-size');
+const autoScrollCheckbox = document.getElementById('auto-scroll');
+
+// ── Multi-Select Dropdown Widget ──
+class MultiSelectDropdown {
+  constructor(container, options) {
+    this.allLabel = options.allLabel || 'All';
+    this.noun = options.noun || 'items';
+    this.items = new Map(); // value -> label
+    this.selected = new Set();
+    this.onChange = options.onChange || function() {};
+    this._build(container);
+    if (options.items) {
+      for (const [value, label] of options.items) this.addItem(value, label);
+    }
+  }
+
+  _build(container) {
+    this.el = document.createElement('div');
+    this.el.className = 'multiselect';
+
+    this.btn = document.createElement('button');
+    this.btn.className = 'multiselect-btn';
+    this.btn.type = 'button';
+    this.btn.textContent = this.allLabel;
+    this.el.appendChild(this.btn);
+
+    this.list = document.createElement('div');
+    this.list.className = 'multiselect-list';
+
+    const actions = document.createElement('div');
+    actions.className = 'multiselect-actions';
+    const allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.textContent = 'All';
+    allBtn.addEventListener('click', (e) => { e.stopPropagation(); this.selectAll(); });
+    const noneBtn = document.createElement('button');
+    noneBtn.type = 'button';
+    noneBtn.textContent = 'None';
+    noneBtn.addEventListener('click', (e) => { e.stopPropagation(); this.selectNone(); });
+    actions.appendChild(allBtn);
+    actions.appendChild(noneBtn);
+    this.list.appendChild(actions);
+
+    this.itemsContainer = document.createElement('div');
+    this.list.appendChild(this.itemsContainer);
+    this.el.appendChild(this.list);
+
+    this.btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggle();
+    });
+
+    document.addEventListener('click', () => this.close());
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.close(); });
+
+    container.appendChild(this.el);
+  }
+
+  addItem(value, label) {
+    if (this.items.has(value)) return;
+    this.items.set(value, label);
+    this.selected.add(value); // default: all selected
+
+    const item = document.createElement('label');
+    item.className = 'multiselect-item';
+    item.addEventListener('click', (e) => e.stopPropagation());
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.dataset.value = value;
+    cb.addEventListener('change', () => {
+      if (cb.checked) this.selected.add(value);
+      else this.selected.delete(value);
+      this._updateLabel();
+      this.onChange(this.getSelected());
+    });
+
+    const span = document.createElement('span');
+    span.textContent = label;
+
+    item.appendChild(cb);
+    item.appendChild(span);
+    this.itemsContainer.appendChild(item);
+    this._updateLabel();
+  }
+
+  toggle() {
+    const isOpen = this.list.classList.toggle('open');
+    this.btn.classList.toggle('open', isOpen);
+  }
+
+  close() {
+    this.list.classList.remove('open');
+    this.btn.classList.remove('open');
+  }
+
+  selectAll() {
+    for (const value of this.items.keys()) this.selected.add(value);
+    this._syncCheckboxes();
+    this._updateLabel();
+    this.onChange(this.getSelected());
+  }
+
+  selectNone() {
+    this.selected.clear();
+    this._syncCheckboxes();
+    this._updateLabel();
+    this.onChange(this.getSelected());
+  }
+
+  setSelected(values) {
+    this.selected.clear();
+    for (const v of values) {
+      if (this.items.has(v)) this.selected.add(v);
+    }
+    this._syncCheckboxes();
+    this._updateLabel();
+  }
+
+  getSelected() {
+    return new Set(this.selected);
+  }
+
+  isAllSelected() {
+    return this.items.size === 0 || this.selected.size === this.items.size;
+  }
+
+  matchesValue(value) {
+    return this.isAllSelected() || this.selected.has(value);
+  }
+
+  _syncCheckboxes() {
+    for (const cb of this.itemsContainer.querySelectorAll('input[type="checkbox"]')) {
+      cb.checked = this.selected.has(cb.dataset.value);
+    }
+  }
+
+  _updateLabel() {
+    if (this.items.size === 0 || this.selected.size === this.items.size) {
+      this.btn.textContent = this.allLabel;
+    } else if (this.selected.size === 0) {
+      this.btn.textContent = 'None';
+    } else if (this.selected.size === 1) {
+      const val = this.selected.values().next().value;
+      this.btn.textContent = this.items.get(val) || val;
+    } else {
+      this.btn.textContent = this.selected.size + ' ' + this.noun;
+    }
+  }
+}
+
+// Create system filter multi-select
+const systemFilterDropdown = new MultiSelectDropdown(
+  document.getElementById('system-filter-container'),
+  { allLabel: 'All Systems', noun: 'systems', onChange: onSystemFilterChange }
+);
+
+// Create type filter multi-select
+const typeFilterDropdown = new MultiSelectDropdown(
+  document.getElementById('type-filter-container'),
+  {
+    allLabel: 'All Types',
+    noun: 'types',
+    items: [
+      ['grant', 'Grant'],
+      ['affiliation', 'Affiliation'],
+      ['registration', 'Registration'],
+      ['deregistration', 'Deregistration'],
+      ['acknowledge', 'Acknowledge'],
+      ['data', 'Data Grant'],
+      ['location', 'Location'],
+      ['call-end', 'Call End'],
+      ['signal', 'Signal'],
+      ['call-alert', 'Call Alert'],
+    ],
+    onChange: onTypeFilterChange,
+  }
+);
+const clearBtn = document.getElementById('clear-btn');
+
+// ── State ──
+let eventSource = null;
+let lastEventId = '';
+let totalCount = 0;
+let eventCountDirty = false;
+let everConnected = false;
+
+// Active calls: call_id -> { data, row, startTimeMs, fading, lastAudioTime, lastElapsedText, panDot, wasAudioActive }
+const activeChannels = new Map();
+// Frequency view: "system_id:freq" -> { data, row, startTimeMs, idle, elapsedCell, panDot, ... }
+let viewMode = 'talkgroup'; // 'talkgroup' or 'frequency'
+const freqChannels = new Map();
+// Seen systems for filter dropdown
+const seenSystems = new Map(); // system_id -> system_name
+var _pendingSystemRestore = null; // deferred system filter restore (array of system IDs)
+// Talkgroup metadata cache: "system_id:tgid" -> { alpha_tag, description, group, tag }
+const tgCache = new Map();
+
+function setStatus(state, text) {
+  statusDot.className = 'status-dot ' + state;
+  statusText.textContent = text;
+  if (window.ehSetNetworkStatus) window.ehSetNetworkStatus(state);
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d)) return '';
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function parseStartTimeMs(startTime) {
+  if (!startTime) return 0;
+  var t = new Date(startTime).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
+function formatElapsedMs(startMs) {
+  if (!startMs) return '';
+  var secs = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+  var h = Math.floor(secs / 3600);
+  return h + ':' + String(Math.floor((secs % 3600) / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0');
+}
+
+function mapAudioType(audioType) {
+  if (!audioType) return '';
+  const lower = String(audioType).toLowerCase();
+  if (lower === 'digital tdma') return 'TDMA';
+  if (lower === 'digital') return 'FDMA';
+  if (lower === 'analog') return 'Analog';
+  return String(audioType);
+}
+
+// System name lookup (populated from /api/v1/systems on load)
+const systemNames = new Map();
+function getSystemName(data) {
+  if (data.system_name) return data.system_name;
+  if (data.system_id && systemNames.has(data.system_id)) return systemNames.get(data.system_id);
+  return 'sys-' + (data.system_id || '?');
+}
+
+function getSiteName(data) {
+  return data.short_name || data.site_short_name || data.sys_name || '';
+}
+
+function matchesSystemFilter(data) {
+  return systemFilterDropdown.matchesValue(String(data.system_id));
+}
+
+// ── Event type to badge mapping ──
+function getBadgeInfo(eventType) {
+  switch (eventType) {
+    case 'call':
+    case 'grant':
+      return { cls: 'badge-grant', label: 'GRANT' };
+    case 'join':
+      return { cls: 'badge-affiliation', label: 'AFFILIATION' };
+    case 'on':
+      return { cls: 'badge-registration', label: 'REGISTRATION' };
+    case 'off':
+      return { cls: 'badge-deregistration', label: 'DEREGISTRATION' };
+    case 'ackresp':
+      return { cls: 'badge-acknowledge', label: 'ACKNOWLEDGE' };
+    case 'data':
+      return { cls: 'badge-data', label: 'DATA GRANT' };
+    case 'location':
+      return { cls: 'badge-location', label: 'LOCATION' };
+    case 'end':
+    case 'call_end':
+    case 'call-end':
+      return { cls: 'badge-call-end', label: 'CALL END' };
+    case 'signal':
+      return { cls: 'badge-signal', label: 'SIGNAL' };
+    case 'call_alert':
+      return { cls: 'badge-call-alert', label: 'CALL ALERT' };
+    default:
+      return { cls: 'badge-data', label: String(eventType || '?').toUpperCase() };
+  }
+}
+
+// Map eventType to a filter key (for the type filter dropdown)
+function getFilterKey(eventType) {
+  switch (eventType) {
+    case 'call': case 'grant': return 'grant';
+    case 'join': return 'affiliation';
+    case 'on': return 'registration';
+    case 'off': return 'deregistration';
+    case 'ackresp': return 'acknowledge';
+    case 'data': return 'data';
+    case 'location': return 'location';
+    case 'end': case 'call_end': case 'call-end': return 'call-end';
+    case 'signal': return 'signal';
+    case 'call_alert': return 'call-alert';
+    default: return eventType;
+  }
+}
+
+// ── Track systems for filter dropdown ──
+function trackSystem(data) {
+  if (!data.system_id) return;
+  const sid = String(data.system_id);
+  if (!seenSystems.has(sid)) {
+    const name = data.system_name || 'sys-' + sid;
+    seenSystems.set(sid, name);
+    systemFilterDropdown.addItem(sid, name);
+    // Apply pending restore once all saved systems are available
+    if (typeof _pendingSystemRestore !== 'undefined' && _pendingSystemRestore) {
+      const allFound = _pendingSystemRestore.every(s => systemFilterDropdown.items.has(s));
+      if (allFound) {
+        systemFilterDropdown.setSelected(_pendingSystemRestore);
+        _pendingSystemRestore = null;
+        refilterActivityRows();
+        for (const entry of activeChannels.values()) applyChannelSystemFilter(entry);
+        for (const entry of freqChannels.values()) applyChannelSystemFilter(entry);
+        updateChannelsEmptyState();
+      }
+    }
+  }
+}
+
+// ── Active Voice Channels ──
+function updateChannelsEmptyState() {
+  var count = viewMode === 'frequency' ? freqChannels.size : activeChannels.size;
+  channelsEmpty.style.display = count === 0 ? '' : 'none';
+}
+
+function buildChannelCells(d, entry) {
+  // Build cells using DOM methods for XSS safety
+  const freq = d.freq ? (d.freq / 1e6).toFixed(4) : '';
+  const mode = mapAudioType(d.audio_type);
+  const encrypted = d.encrypted === true;
+
+  const cells = [];
+
+  // Speaker icon (audio mute toggle)
+  const cSpk = document.createElement('td');
+  cSpk.style.textAlign = 'center';
+  if (d.tgid != null) {
+    const spk = document.createElement('button');
+    spk.className = 'spk-btn';
+    spk.dataset.tgid = String(d.tgid);
+    var isMuted = window._omniAudio && window._omniAudio.isMuted(d.tgid);
+    spk.textContent = isMuted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
+    if (isMuted) spk.classList.add('muted');
+    spk.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (window._omniAudio) window._omniAudio.toggleMute(d.tgid);
+    });
+    cSpk.appendChild(spk);
+  }
+  cells.push(cSpk);
+
+  // Pan indicator
+  const cPan = document.createElement('td');
+  cPan.style.textAlign = 'center';
+  cPan.className = 'pan-cell';
+  const panBar = document.createElement('span');
+  panBar.className = 'pan-indicator';
+  const panCenter = document.createElement('span');
+  panCenter.className = 'pan-center';
+  panBar.appendChild(panCenter);
+  const panDot = document.createElement('span');
+  panDot.className = 'pan-dot';
+  panDot.style.left = '14px'; // center default
+  panBar.appendChild(panDot);
+  cPan.appendChild(panBar);
+  cells.push(cPan);
+
+  // System
+  const c0 = document.createElement('td');
+  c0.textContent = getSystemName(d);
+  cells.push(c0);
+
+  // Channel (freq)
+  const c1 = document.createElement('td');
+  c1.textContent = freq;
+  cells.push(c1);
+
+  // TG
+  const c2 = document.createElement('td');
+  c2.textContent = d.tgid != null ? String(d.tgid) : '';
+  cells.push(c2);
+
+  // Alpha Tag
+  const c3 = document.createElement('td');
+  c3.textContent = d.tg_alpha_tag || '';
+  cells.push(c3);
+
+  // Source (unit, colored)
+  const c4 = document.createElement('td');
+  const unitSpan = document.createElement('span');
+  unitSpan.className = 'val';
+  unitSpan.textContent = d.unit != null ? String(d.unit) : '';
+  c4.appendChild(unitSpan);
+  cells.push(c4);
+
+  // Unit Alias
+  const c5 = document.createElement('td');
+  c5.textContent = d.unit_alpha_tag || '';
+  cells.push(c5);
+
+  // Elapsed
+  const c6 = document.createElement('td');
+  c6.className = 'elapsed-cell';
+  c6.textContent = formatElapsedMs(entry.startTimeMs);
+  cells.push(c6);
+
+  // Mode
+  const c7 = document.createElement('td');
+  c7.textContent = mode;
+  cells.push(c7);
+
+  // Encryption
+  const c8 = document.createElement('td');
+  if (encrypted) {
+    const badge = document.createElement('span');
+    badge.className = 'encrypted-badge';
+    badge.textContent = 'ENCRYPTED';
+    badge.dataset.short = 'ENC';
+    c8.appendChild(badge);
+  }
+  cells.push(c8);
+
+  return cells;
+}
+
+function addActiveChannel(data) {
+  if (viewMode === 'frequency') { addActiveChannelFreqMode(data); return; }
+
+  const callId = data.call_id;
+  if (!callId) return;
+
+  trackSystem(data);
+
+  // One row per talkgroup. If ANY existing entry has this tgid, reuse it.
+  if (data.tgid) {
+    for (var [existingKey, existing] of activeChannels) {
+      if (existing.data.tgid === data.tgid && !existing.fading) {
+        // Re-key under new call_id, update data
+        activeChannels.delete(existingKey);
+        existing.data = data;
+        existing.startTimeMs = parseStartTimeMs(data.start_time) || existing.startTimeMs;
+        existing.row.dataset.callId = String(callId);
+        existing.fading = false;
+        existing.row.classList.remove('fading');
+        existing.row.style.opacity = '';
+        renderChannelRow(existing);
+        applyChannelSystemFilter(existing);
+        activeChannels.set(callId, existing);
+        updateChannelsEmptyState();
+        return;
+      }
+    }
+  }
+
+  // Exact call_id match (shouldn't happen after above, but safety)
+  let entry = activeChannels.get(callId);
+  if (entry) {
+    entry.data = data;
+    entry.startTimeMs = parseStartTimeMs(data.start_time) || entry.startTimeMs;
+    entry.fading = false;
+    entry.row.classList.remove('fading');
+    entry.row.style.opacity = '';
+    renderChannelRow(entry);
+    applyChannelSystemFilter(entry);
+    updateChannelsEmptyState();
+    return;
+  }
+
+  // New tgid — create row
+  const row = document.createElement('tr');
+  row.className = 'channel-row';
+  row.dataset.callId = String(callId);
+  row.dataset.tgid = String(data.tgid || 0);
+  if (data.system_id) row.dataset.systemId = String(data.system_id);
+
+  entry = { data: data, row: row, startTimeMs: parseStartTimeMs(data.start_time), fading: false, elapsedCell: null, panDot: null, wasAudioActive: false, lastAudioTime: 0, lastElapsedText: '' };
+  activeChannels.set(callId, entry);
+  renderChannelRow(entry);
+  entry.elapsedCell = row.querySelector('.elapsed-cell');
+  entry.panDot = row.querySelector('.pan-dot');
+  applyChannelSystemFilter(entry);
+
+  insertChannelSorted(row, data.tgid || 0);
+  updateChannelsEmptyState();
+}
+
+// Create a channel row from audio frames (no MQTT required)
+function addAudioChannel(tgid, systemId) {
+  if (viewMode === 'frequency') return; // no freq available from audio frames
+  var channelKey = 'audio-' + systemId + '-' + tgid;
+
+  // Already exists (audio-keyed or real call_id with same tgid)?
+  if (activeChannels.has(channelKey)) {
+    var existing = activeChannels.get(channelKey);
+    existing.lastAudioTime = Date.now();
+    return;
+  }
+  // Check if a real call_id entry already covers this tgid
+  for (var e of activeChannels.values()) {
+    if (e.data.tgid === tgid && e.data.system_id === systemId && !e.fading) {
+      e.lastAudioTime = Date.now();
+      return;
+    }
+  }
+
+  // Look up metadata from talkgroup cache
+  var meta = tgCache.get(systemId + ':' + tgid) || {};
+  var sysName = systemNames.get(systemId) || 'sys-' + systemId;
+
+  var data = {
+    call_id: channelKey,
+    system_id: systemId,
+    system_name: sysName,
+    tgid: tgid,
+    tg_alpha_tag: meta.alpha_tag || '',
+    start_time: new Date().toISOString(),
+  };
+
+  trackSystem(data);
+
+  var row = document.createElement('tr');
+  row.className = 'channel-row';
+  row.dataset.callId = channelKey;
+  row.dataset.tgid = String(tgid);
+  row.dataset.systemId = String(systemId);
+
+  var entry = { data: data, row: row, startTimeMs: parseStartTimeMs(data.start_time), fading: false, elapsedCell: null, panDot: null, wasAudioActive: false, lastAudioTime: Date.now(), lastElapsedText: '' };
+  activeChannels.set(channelKey, entry);
+  renderChannelRow(entry);
+  entry.elapsedCell = row.querySelector('.elapsed-cell');
+  entry.panDot = row.querySelector('.pan-dot');
+  applyChannelSystemFilter(entry);
+
+  insertChannelSorted(row, tgid);
+  updateChannelsEmptyState();
+}
+
+// Insert row into channelsBody sorted by tgid ascending
+function insertChannelSorted(row, tgid) {
+  var rows = channelsBody.children;
+  for (var i = 0; i < rows.length; i++) {
+    var rowTgid = parseInt(rows[i].dataset.tgid, 10) || 0;
+    if (tgid < rowTgid) {
+      channelsBody.insertBefore(row, rows[i]);
+      return;
+    }
+  }
+  channelsBody.appendChild(row);
+}
+
+// ── Frequency Mode Functions ──
+function addActiveChannelFreqMode(data) {
+  if (!data.freq) return; // skip calls with no frequency
+  trackSystem(data);
+
+  var key = String(data.system_id) + ':' + String(data.freq);
+  var entry = freqChannels.get(key);
+
+  if (entry) {
+    // Existing frequency — update with new call data
+    entry.data = data;
+    entry.idle = false;
+    entry.startTimeMs = parseStartTimeMs(data.start_time) || entry.startTimeMs;
+    entry.row.classList.remove('channel-idle');
+    entry.row.dataset.tgid = String(data.tgid || 0);
+    if (data.system_id) entry.row.dataset.systemId = String(data.system_id);
+    renderChannelRow(entry);
+    applyChannelSystemFilter(entry);
+    updateChannelsEmptyState();
+    return;
+  }
+
+  // New frequency — create row
+  var row = document.createElement('tr');
+  row.className = 'channel-row';
+  row.dataset.callId = String(data.call_id || '');
+  row.dataset.tgid = String(data.tgid || 0);
+  row.dataset.freq = String(data.freq);
+  if (data.system_id) row.dataset.systemId = String(data.system_id);
+
+  entry = { data: data, row: row, startTimeMs: parseStartTimeMs(data.start_time), fading: false, idle: false, elapsedCell: null, panDot: null, wasAudioActive: false, lastAudioTime: 0, lastElapsedText: '' };
+  freqChannels.set(key, entry);
+  renderChannelRow(entry);
+  entry.elapsedCell = row.querySelector('.elapsed-cell');
+  entry.panDot = row.querySelector('.pan-dot');
+  applyChannelSystemFilter(entry);
+
+  insertChannelSortedByFreq(row, data.freq);
+  updateChannelsEmptyState();
+}
+
+function removeActiveChannelFreqMode(data) {
+  if (!data.freq && !data.tgid) return;
+
+  var entry = null;
+  if (data.freq) {
+    entry = freqChannels.get(String(data.system_id) + ':' + String(data.freq));
+  }
+  // Fallback: scan by tgid
+  if (!entry && data.tgid) {
+    for (var e of freqChannels.values()) {
+      if (e.data.tgid === data.tgid && !e.idle) { entry = e; break; }
+    }
+  }
+  if (!entry || entry.idle) return;
+
+  entry.idle = true;
+  entry.row.classList.add('channel-idle');
+  if (entry.elapsedCell) entry.elapsedCell.textContent = '\u2014';
+}
+
+function insertChannelSortedByFreq(row, freq) {
+  for (var i = 0; i < channelsBody.children.length; i++) {
+    var rowFreq = parseInt(channelsBody.children[i].dataset.freq, 10) || 0;
+    if (freq < rowFreq) { channelsBody.insertBefore(row, channelsBody.children[i]); return; }
+  }
+  channelsBody.appendChild(row);
+}
+
+function renderChannelRow(entry) {
+  const d = entry.data;
+  const row = entry.row;
+
+  if (d.emergency) {
+    row.classList.add('emergency');
+  } else {
+    row.classList.remove('emergency');
+  }
+
+  // First render: build all cells
+  if (!row.firstChild) {
+    const cells = buildChannelCells(d, entry);
+    for (const cell of cells) {
+      row.appendChild(cell);
+    }
+    entry.elapsedCell = row.querySelector('.elapsed-cell');
+    entry.panDot = row.querySelector('.pan-dot');
+    return;
+  }
+
+  // Subsequent renders: update changed cells in-place (skip full teardown)
+  const ch = row.children;
+  if (ch.length < 11) {
+    // Fallback: full rebuild if unexpected structure
+    while (row.firstChild) row.removeChild(row.firstChild);
+    const cells = buildChannelCells(d, entry);
+    for (const cell of cells) row.appendChild(cell);
+    entry.elapsedCell = row.querySelector('.elapsed-cell');
+    entry.panDot = row.querySelector('.pan-dot');
+    return;
+  }
+  // Update speaker icon (col 0)
+  var spk = ch[0].querySelector('.spk-btn');
+  if (spk && d.tgid != null) {
+    var isMuted = window._omniAudio && window._omniAudio.isMuted(d.tgid);
+    spk.textContent = isMuted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
+    if (isMuted) spk.classList.add('muted'); else spk.classList.remove('muted');
+  }
+  // col 1 (pan) - no update needed
+  // col 2 (system) - rarely changes
+  var sysName = getSystemName(d);
+  if (ch[2].textContent !== sysName) ch[2].textContent = sysName;
+  // col 3 (freq)
+  var freq = d.freq ? (d.freq / 1e6).toFixed(4) : '';
+  if (ch[3].textContent !== freq) ch[3].textContent = freq;
+  // col 4 (tgid)
+  var tgStr = d.tgid != null ? String(d.tgid) : '';
+  if (ch[4].textContent !== tgStr) ch[4].textContent = tgStr;
+  // col 5 (alpha tag)
+  var alpha = d.tg_alpha_tag || '';
+  if (ch[5].textContent !== alpha) ch[5].textContent = alpha;
+  // col 6 (source unit)
+  var unitStr = d.unit != null ? String(d.unit) : '';
+  var unitSpan = ch[6].querySelector('.val');
+  if (unitSpan && unitSpan.textContent !== unitStr) unitSpan.textContent = unitStr;
+  // col 7 (unit alias)
+  var unitAlias = d.unit_alpha_tag || '';
+  if (ch[7].textContent !== unitAlias) ch[7].textContent = unitAlias;
+  // col 8 (elapsed) - handled by timer
+  // col 9 (mode)
+  var mode = mapAudioType(d.audio_type);
+  if (ch[9].textContent !== mode) ch[9].textContent = mode;
+  // col 10 (encryption) - skip, rarely changes
+}
+
+function removeActiveChannel(data) {
+  if (viewMode === 'frequency') { removeActiveChannelFreqMode(data); return; }
+
+  // Collect ALL entries matching this call — by call_id and by tgid
+  var toFade = [];
+  if (data.call_id) {
+    var exact = activeChannels.get(data.call_id);
+    if (exact && !exact.fading) toFade.push(exact);
+  }
+  if (data.tgid) {
+    for (const [id, ch] of activeChannels) {
+      if (ch.data.tgid === data.tgid && !ch.fading && toFade.indexOf(ch) === -1) {
+        toFade.push(ch);
+      }
+    }
+  }
+
+  if (!toFade.length) return;
+
+  for (var i = 0; i < toFade.length; i++) {
+    var entry = toFade[i];
+    entry.fading = true;
+    entry.row.classList.add('fading');
+    (function(e) {
+      var key = e.data.call_id;
+      setTimeout(function() {
+        if (e.row.parentNode) e.row.parentNode.removeChild(e.row);
+        activeChannels.delete(key);
+        updateChannelsEmptyState();
+      }, 5000);
+    })(entry);
+  }
+  updateChannelsEmptyState();
+}
+
+function applyChannelSystemFilter(entry) {
+  entry.row.style.display = systemFilterDropdown.matchesValue(String(entry.data.system_id)) ? '' : 'none';
+}
+
+// ── Unit Activity Feed ──
+function buildActivityRow(eventType, data) {
+  const badge = getBadgeInfo(eventType);
+  const time = formatTime(data.time || data.start_time) || new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const unitId = data.unit_id || data.unit || '';
+  const tgid = data.tgid || '';
+  const tgAlpha = data.tg_alpha_tag || '';
+  const unitAlias = data.unit_alpha_tag || '';
+  const systemName = getSystemName(data);
+  const siteName = getSiteName(data);
+
+  const row = document.createElement('tr');
+  if (data.system_id) row.dataset.systemId = String(data.system_id);
+  row.dataset.filterKey = getFilterKey(eventType);
+
+  // Time
+  const c0 = document.createElement('td');
+  c0.textContent = time;
+  row.appendChild(c0);
+
+  // System
+  const c1 = document.createElement('td');
+  c1.textContent = systemName;
+  row.appendChild(c1);
+
+  // Site
+  const c2 = document.createElement('td');
+  c2.textContent = siteName;
+  row.appendChild(c2);
+
+  // Unit ID (colored)
+  const c3 = document.createElement('td');
+  const uidSpan = document.createElement('span');
+  uidSpan.className = 'val';
+  uidSpan.textContent = unitId != null ? String(unitId) : '';
+  c3.appendChild(uidSpan);
+  row.appendChild(c3);
+
+  // Unit Alias
+  const c4 = document.createElement('td');
+  c4.textContent = unitAlias;
+  row.appendChild(c4);
+
+  // Type badge
+  const c5 = document.createElement('td');
+  const badgeSpan = document.createElement('span');
+  badgeSpan.className = 'badge ' + badge.cls;
+  badgeSpan.textContent = badge.label;
+  c5.appendChild(badgeSpan);
+  row.appendChild(c5);
+
+  // TG (for call_alert: show target unit instead)
+  const c6 = document.createElement('td');
+  c6.textContent = eventType === 'call_alert'
+    ? (data.target_unit != null ? '→ ' + String(data.target_unit) : '')
+    : (tgid != null ? String(tgid) : '');
+  row.appendChild(c6);
+
+  // TG Alpha (for call_alert: show target unit alpha tag)
+  const c7 = document.createElement('td');
+  c7.textContent = eventType === 'call_alert'
+    ? (data.target_unit_alpha_tag || '')
+    : tgAlpha;
+  row.appendChild(c7);
+
+  return row;
+}
+
+// Rolling dedup buffer: skip activity rows where unit, type, and tgid match within 10s
+const recentActivity = []; // { unit, type, tgid, time }
+const DEDUP_WINDOW = 10000;
+
+// Normalize event types so call/grant and end/call_end dedup against each other
+function dedupType(t) {
+  switch (t) {
+    case 'call': case 'grant': return 'grant';
+    case 'end': case 'call_end': case 'call-end': return 'call_end';
+    default: return t;
+  }
+}
+
+function isDuplicateActivity(eventType, data) {
+  var now = Date.now();
+  while (recentActivity.length && now - recentActivity[0].time > DEDUP_WINDOW) {
+    recentActivity.shift();
+  }
+  var unit = data.unit || data.unit_id || 0;
+  var tgid = data.tgid || 0;
+  var norm = dedupType(eventType);
+  // Call-level events (grant/call_end): one per talkgroup, dedup on (type, tgid) only
+  // Unit-level events: dedup on (unit, type, tgid)
+  var callLevel = (norm === 'grant' || norm === 'call_end');
+  for (var i = 0; i < recentActivity.length; i++) {
+    var r = recentActivity[i];
+    if (r.type === norm && r.tgid === tgid && (callLevel || r.unit === unit)) return true;
+  }
+  recentActivity.push({ unit: unit, type: norm, tgid: tgid, time: now });
+  return false;
+}
+
+function addActivityRow(eventType, data) {
+  trackSystem(data);
+
+  const filterKey = getFilterKey(eventType);
+  if (!typeFilterDropdown.matchesValue(filterKey)) return;
+  if (!matchesSystemFilter(data)) return;
+  if (isDuplicateActivity(eventType, data)) return;
+
+  totalCount++;
+  if (!eventCountDirty) { eventCountDirty = true; requestAnimationFrame(function() { eventCountEl.textContent = totalCount; eventCountDirty = false; }); }
+
+  // When paused, still count but don't touch the DOM
+  if (!autoScrollCheckbox.checked) return;
+
+  const row = buildActivityRow(eventType, data);
+  activityBody.insertBefore(row, activityBody.firstChild);
+
+  // Trim excess rows
+  const maxRows = parseInt(bufferSizeSelect.value, 10) || 200;
+  while (activityBody.children.length > maxRows) {
+    activityBody.removeChild(activityBody.lastChild);
+  }
+
+  activityScroll.scrollTop = 0;
+}
+
+// Elapsed timer merged into unified update loop below (audio status poll)
+
+// ── System Filter ──
+function onSystemFilterChange() {
+  localStorage.setItem('omni-system-filter', JSON.stringify([...systemFilterDropdown.getSelected()]));
+  // Filter active channels (both maps)
+  for (const entry of activeChannels.values()) {
+    applyChannelSystemFilter(entry);
+  }
+  for (const entry of freqChannels.values()) {
+    applyChannelSystemFilter(entry);
+  }
+  updateChannelsEmptyState();
+
+  // Filter activity rows (hide/show based on both filters)
+  refilterActivityRows();
+
+  // Update audio subscription if listening
+  if (typeof engine !== 'undefined' && engine && typeof listening !== 'undefined' && listening) {
+    engine.subscribe(getSubscribeFilter());
+  }
+}
+
+// ── Type Filter ──
+function onTypeFilterChange() {
+  localStorage.setItem('omni-type-filter', JSON.stringify([...typeFilterDropdown.getSelected()]));
+  refilterActivityRows();
+}
+
+function refilterActivityRows() {
+  for (const row of activityBody.children) {
+    const sysMatch = systemFilterDropdown.matchesValue(row.dataset.systemId || '');
+    const typeMatch = typeFilterDropdown.matchesValue(row.dataset.filterKey || '');
+    row.style.display = (sysMatch && typeMatch) ? '' : 'none';
+  }
+}
+
+// ── Controls ──
+bufferSizeSelect.addEventListener('change', function() {
+  const maxRows = parseInt(bufferSizeSelect.value, 10) || 200;
+  while (activityBody.children.length > maxRows) {
+    activityBody.removeChild(activityBody.lastChild);
+  }
+});
+
+clearBtn.addEventListener('click', function() {
+  while (activityBody.firstChild) {
+    activityBody.removeChild(activityBody.firstChild);
+  }
+});
+
+// ── SSE Connection ──
+function connect() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  const url = '/api/v1/events/stream';
+
+  setStatus('connecting', 'connecting...');
+  everConnected = false;
+  eventSource = new EventSource(url);
+
+  eventSource.onopen = function() {
+    setStatus('connected', 'connected');
+    everConnected = true;
+  };
+
+  eventSource.onerror = function() {
+    if (eventSource.readyState === EventSource.CLOSED) {
+      setStatus('disconnected', 'disconnected');
+    } else {
+      setStatus('connecting', 'reconnecting...');
+    }
+  };
+
+  // Listen for relevant event types
+  eventSource.addEventListener('call_start', function(e) {
+    lastEventId = e.lastEventId;
+    try {
+      const data = JSON.parse(e.data);
+      addActiveChannel(data);
+      addActivityRow('grant', data);
+    } catch (err) {
+      console.error('parse error', 'call_start', err);
+    }
+  });
+
+  eventSource.addEventListener('call_end', function(e) {
+    lastEventId = e.lastEventId;
+    try {
+      const data = JSON.parse(e.data);
+      removeActiveChannel(data);
+      addActivityRow('call_end', data);
+    } catch (err) {
+      console.error('parse error', 'call_end', err);
+    }
+  });
+
+  eventSource.addEventListener('unit_event', function(e) {
+    lastEventId = e.lastEventId;
+    try {
+      const data = JSON.parse(e.data);
+      addActivityRow(data.event_type || 'unknown', data);
+    } catch (err) {
+      console.error('parse error', 'unit_event', err);
+    }
+  });
+}
+
+// Fetch system names for friendly display
+fetch('/api/v1/systems')
+  .then(function(r) { return r.ok ? r.json() : {}; })
+  .then(function(resp) {
+    var systems = resp.systems || resp;
+    if (Array.isArray(systems)) {
+      for (const s of systems) {
+        var id = s.system_id || s.id;
+        var name = s.name || s.short_name;
+        if (id && name) {
+          systemNames.set(id, name);
+          trackSystem({ system_id: id, system_name: name });
+        }
+      }
+    }
+  })
+  .catch(function() { /* ignore — fallback to sys-N */ });
+
+// Fetch talkgroup metadata cache for audio-driven channel creation
+fetch('/api/v1/talkgroups?limit=5000')
+  .then(function(r) { return r.ok ? r.json() : {}; })
+  .then(function(resp) {
+    var tgs = resp.talkgroups || resp;
+    if (Array.isArray(tgs)) {
+      for (var i = 0; i < tgs.length; i++) {
+        var tg = tgs[i];
+        var sysId = tg.system_id;
+        var tgid = tg.tgid;
+        if (sysId && tgid) {
+          tgCache.set(sysId + ':' + tgid, {
+            alpha_tag: tg.alpha_tag || '',
+            description: tg.description || '',
+            group: tg.group || '',
+            tag: tg.tag || '',
+          });
+        }
+      }
+    }
+  })
+  .catch(function() { /* ignore — audio channels will show without metadata */ });
+
+connect();
+
+// ── View Toggle (TG / FREQ) ──
+var channelsHeader = document.getElementById('channels-header');
+
+function switchViewMode(newMode) {
+  if (newMode === viewMode) return;
+  viewMode = newMode;
+
+  // Update toggle buttons
+  var btns = document.querySelectorAll('#view-toggle .view-btn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('active', btns[i].dataset.view === newMode);
+  }
+
+  // Clear table body (keep empty state row)
+  while (channelsBody.firstChild) {
+    channelsBody.removeChild(channelsBody.firstChild);
+  }
+  channelsBody.appendChild(channelsEmpty);
+
+  if (newMode === 'frequency') {
+    channelsHeader.textContent = 'Frequency Monitor';
+    // Seed freqChannels from any active calls that have freq
+    for (var entry of activeChannels.values()) {
+      if (entry.data.freq && !entry.fading) {
+        addActiveChannelFreqMode(entry.data);
+      }
+    }
+  } else {
+    channelsHeader.textContent = 'Active Voice Channels';
+    // Re-insert activeChannels rows
+    for (var entry of activeChannels.values()) {
+      if (!entry.fading) {
+        // Re-build row from scratch since we cleared DOM
+        while (entry.row.firstChild) entry.row.removeChild(entry.row.firstChild);
+        renderChannelRow(entry);
+        entry.elapsedCell = entry.row.querySelector('.elapsed-cell');
+        entry.panDot = entry.row.querySelector('.pan-dot');
+        applyChannelSystemFilter(entry);
+        insertChannelSorted(entry.row, entry.data.tgid || 0);
+      }
+    }
+    // Clear freq map (will re-seed on next switch)
+    freqChannels.clear();
+  }
+
+  updateChannelsEmptyState();
+
+  // Persist viewMode — merge into omni-settings
+  try {
+    var s = JSON.parse(localStorage.getItem('omni-settings') || '{}');
+    s.viewMode = viewMode;
+    localStorage.setItem('omni-settings', JSON.stringify(s));
+  } catch (e) {}
+}
+
+// Wire toggle button clicks
+document.getElementById('view-toggle').addEventListener('click', function(e) {
+  var btn = e.target.closest('.view-btn');
+  if (btn && btn.dataset.view) switchViewMode(btn.dataset.view);
+});
+
+// ── Stale Row Cleanup (15s) ──
+// SSE and WebSocket audio handle all additions. This only removes rows that got stuck.
+setInterval(function() {
+  if (viewMode === 'frequency') return; // freq mode rows are persistent
+  var now = Date.now();
+  var toRemove = [];
+  for (var pair of activeChannels) {
+    var key = pair[0];
+    var ent = pair[1];
+    if (ent.fading) continue;
+
+    var age = ent.startTimeMs ? now - ent.startTimeMs : 0;
+    var hasRecentAudio = ent.lastAudioTime && (now - ent.lastAudioTime < 10000);
+
+    // Remove rows older than 5 minutes with no recent audio
+    if (age > 300000 && !hasRecentAudio) {
+      toRemove.push(key);
+    }
+  }
+
+  for (var r = 0; r < toRemove.length; r++) {
+    var staleEntry = activeChannels.get(toRemove[r]);
+    if (staleEntry) {
+      staleEntry.fading = true;
+      staleEntry.row.classList.add('fading');
+      (function(k, e) {
+        setTimeout(function() {
+          if (e.row.parentNode) e.row.parentNode.removeChild(e.row);
+          activeChannels.delete(k);
+          updateChannelsEmptyState();
+        }, 5000);
+      })(toRemove[r], staleEntry);
+    }
+  }
+  if (toRemove.length) updateChannelsEmptyState();
+}, 15000);
+</script>
+<script src="audio-engine.js"></script>
+<script>
+// ── Live Audio Integration ──
+(function() {
+  const listenToggle = document.getElementById('listen-toggle');
+  const listenLabel = document.getElementById('listen-label');
+  const audioControls = document.getElementById('audio-controls');
+  const masterVol = document.getElementById('master-vol');
+  const autoPanToggle = document.getElementById('auto-pan-toggle');
+  const audioStatusEl = document.getElementById('audio-status');
+
+  let engine = null;
+  let listening = false;
+  const selectedTGs = new Set(); // stores "sysId:tgid" composite keys; selected TGs play audio
+  var _pendingLegacyTgids = null; // plain tgid strings awaiting migration to composite keys
+  // Helper: check if any system's version of a tgid is selected
+  function isTGSelected(tgid) {
+    for (var key of selectedTGs) {
+      if (key === tgid || String(key).split(':')[1] === String(tgid)) return true;
+    }
+    return false;
+  }
+
+  // Settings drawer refs
+  const settingsOverlay = document.getElementById('settings-overlay');
+  const settingsPanel = document.getElementById('settings-panel');
+  const settingsBtn = document.getElementById('settings-btn');
+  const settingsClose = document.getElementById('settings-close');
+  const tgSearchInput = document.getElementById('tg-search');
+  const tgListEl = document.getElementById('tg-list');
+  const tgCountEl = document.getElementById('tg-count');
+  const tgSelectAllBtn = document.getElementById('tg-select-all');
+  const tgSelectNoneBtn = document.getElementById('tg-select-none');
+  const setVolumeEl = document.getElementById('set-volume');
+  const setAutoPanEl = document.getElementById('set-auto-pan');
+  const setBufferSizeEl = document.getElementById('set-buffer-size');
+
+  // ── Persist / Restore Settings ──
+  function loadSettings() {
+    try {
+      var saved = JSON.parse(localStorage.getItem('omni-settings') || '{}');
+      if (saved.volume != null) { masterVol.value = saved.volume; setVolumeEl.value = saved.volume; }
+      if (Array.isArray(saved.selected)) {
+        saved.selected.forEach(function(t) { selectedTGs.add(t); });
+        // Migrate legacy plain tgid entries to composite keys once systems are known
+        var legacyTgids = saved.selected.filter(function(t) { return String(t).indexOf(':') === -1; });
+        if (legacyTgids.length > 0) {
+          _pendingLegacyTgids = new Set(legacyTgids.map(String));
+        }
+      }
+      if (saved.autoPan === false) autoPanToggle.checked = false;
+      if (saved.bufferSize) { bufferSizeSelect.value = saved.bufferSize; setBufferSizeEl.value = saved.bufferSize; }
+      if (Array.isArray(saved.systemFilter)) _pendingSystemRestore = saved.systemFilter;
+      else if (typeof saved.systemFilter === 'string' && saved.systemFilter) _pendingSystemRestore = [saved.systemFilter]; // migrate legacy
+      if (Array.isArray(saved.typeFilter)) typeFilterDropdown.setSelected(saved.typeFilter);
+      if (saved.listening) pendingListen = true;
+      if (saved.viewMode === 'frequency') {
+        // Defer switching until after DOM is ready — use setTimeout to avoid race
+        setTimeout(function() { switchViewMode('frequency'); }, 0);
+      }
+      if (Array.isArray(saved.hiddenColumns)) {
+        saved.hiddenColumns.forEach(function(col) {
+          document.body.classList.add('hide-col-' + col);
+          var toggle = document.getElementById('col-' + col);
+          if (toggle) toggle.checked = false;
+        });
+      }
+      if (saved.panelSplit) {
+        document.querySelector('.panel-top').style.height = saved.panelSplit + '%';
+      }
+    } catch (e) {}
+  }
+
+  function saveSettings() {
+    try {
+      var panelsC = document.querySelector('.panels');
+      var panelT = document.querySelector('.panel-top');
+      var pct = panelsC && panelT ? (panelT.offsetHeight / panelsC.offsetHeight * 100).toFixed(1) : null;
+      var obj = {
+        volume: parseInt(masterVol.value),
+        selected: Array.from(selectedTGs),
+        autoPan: autoPanToggle.checked,
+        bufferSize: bufferSizeSelect.value,
+        hiddenColumns: getHiddenColumns(),
+        listening: listening,
+        systemFilter: [...systemFilterDropdown.getSelected()],
+        typeFilter: [...typeFilterDropdown.getSelected()],
+        viewMode: viewMode,
+        panelSplit: pct
+      };
+      localStorage.setItem('omni-settings', JSON.stringify(obj));
+    } catch (e) {}
+  }
+
+  function saveSelectedState() {
+    saveSettings();
+    updateTGCount();
+    updateTGListChecks();
+  }
+
+  function getHiddenColumns() {
+    var cols = [];
+    var toggles = document.querySelectorAll('[data-col]');
+    for (var i = 0; i < toggles.length; i++) {
+      if (!toggles[i].checked) cols.push(toggles[i].dataset.col);
+    }
+    return cols;
+  }
+
+  // Load on init
+  var pendingListen = false;
+  loadSettings();
+
+  // ── Draggable Panel Divider ──
+  var panelDivider = document.getElementById('panel-divider');
+  var panelTop = document.querySelector('.panel-top');
+  var panelsContainer = document.querySelector('.panels');
+  var dragging = false;
+
+  panelDivider.addEventListener('mousedown', startDrag);
+  panelDivider.addEventListener('touchstart', startDrag, { passive: false });
+
+  function startDrag(e) {
+    e.preventDefault();
+    dragging = true;
+    panelDivider.classList.add('dragging');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onDrag);
+    document.addEventListener('touchmove', onDrag, { passive: false });
+    document.addEventListener('mouseup', stopDrag);
+    document.addEventListener('touchend', stopDrag);
+  }
+
+  function onDrag(e) {
+    if (!dragging) return;
+    var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    var rect = panelsContainer.getBoundingClientRect();
+    var offset = clientY - rect.top;
+    var min = 80;
+    var max = rect.height - 80;
+    var clamped = Math.max(min, Math.min(max, offset));
+    panelTop.style.height = clamped + 'px';
+  }
+
+  function stopDrag() {
+    if (!dragging) return;
+    dragging = false;
+    panelDivider.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onDrag);
+    document.removeEventListener('touchmove', onDrag);
+    document.removeEventListener('mouseup', stopDrag);
+    document.removeEventListener('touchend', stopDrag);
+    var pct = (panelTop.offsetHeight / panelsContainer.offsetHeight * 100).toFixed(1);
+    try {
+      var s = JSON.parse(localStorage.getItem('omni-settings') || '{}');
+      s.panelSplit = pct;
+      localStorage.setItem('omni-settings', JSON.stringify(s));
+    } catch (e) {}
+  }
+
+  // Restore system filter — deferred until systems are discovered via trackSystem()
+  // _pendingSystemRestore is set from omni-settings during restore above;
+  // also check standalone localStorage key as fallback
+  if (!_pendingSystemRestore) {
+    try {
+      var _sf = JSON.parse(localStorage.getItem('omni-system-filter'));
+      if (Array.isArray(_sf)) _pendingSystemRestore = _sf;
+    } catch(e) {}
+  }
+
+  // Restore type filter from standalone key as fallback
+  if (typeFilterDropdown.isAllSelected()) {
+    try {
+      var _tf = JSON.parse(localStorage.getItem('omni-type-filter'));
+      if (Array.isArray(_tf) && _tf.length > 0) typeFilterDropdown.setSelected(_tf);
+    } catch(e) {}
+  }
+
+  // ── Audio status helpers ──
+  var lastAudioStatusText = '', lastAudioStatusCls = '';
+  function setAudioStatus(text, cls) {
+    if (text === lastAudioStatusText && cls === lastAudioStatusCls) return;
+    lastAudioStatusText = text;
+    lastAudioStatusCls = cls;
+    audioStatusEl.textContent = text;
+    audioStatusEl.className = 'audio-status' + (cls ? ' ' + cls : '');
+  }
+
+  function updateTGCount() {
+    tgCountEl.textContent = selectedTGs.size + ' selected';
+  }
+  updateTGCount();
+
+  function getSubscribeFilter() {
+    if (systemFilterDropdown.isAllSelected()) return {};
+    var selected = [...systemFilterDropdown.getSelected()].map(s => parseInt(s)).filter(n => !isNaN(n));
+    return selected.length > 0 ? { systems: selected } : {};
+  }
+
+  // ── Audio engine lifecycle ──
+  async function startListening() {
+    if (engine) return;
+    engine = new AudioEngine();
+
+    engine.on('status', function(s) {
+      // status is handled by the 250ms poll below
+    });
+
+    engine.on('error', function() {
+      setAudioStatus('error');
+    });
+
+    engine.on('tg_created', function(ev) {
+      // Selection model: mute everything not in selectedTGs (composite key)
+      engine.setMute(ev.key, !selectedTGs.has(ev.key));
+      // Audio channel rows disabled — SSE call_start handles row creation
+      highlightAudioTG(ev.tgid, true);
+    });
+
+    engine.on('tg_removed', function(ev) {
+      highlightAudioTG(ev.tgid, false);
+    });
+
+    await engine.start();
+    engine.setMasterVolume(parseInt(masterVol.value) / 100);
+    engine.setAutoPan(autoPanToggle.checked);
+    setAutoPanEl.checked = autoPanToggle.checked;
+    engine.subscribe(getSubscribeFilter());
+
+    listening = true;
+    listenToggle.classList.add('active');
+    listenLabel.textContent = 'LISTENING';
+    audioControls.classList.add('visible');
+    setAudioStatus('connecting...');
+    saveSettings();
+  }
+
+  function stopListening() {
+    if (engine) {
+      engine.stop();
+      engine = null;
+    }
+    listening = false;
+    listenToggle.classList.remove('active');
+    listenLabel.textContent = 'LISTEN';
+    audioControls.classList.remove('visible');
+    setAudioStatus('--');
+
+    var rows = document.querySelectorAll('.channel-row.audio-active');
+    for (var i = 0; i < rows.length; i++) rows[i].classList.remove('audio-active');
+    saveSettings();
+  }
+
+  listenToggle.addEventListener('click', function() {
+    if (listening) stopListening(); else startListening();
+  });
+
+  // Don't auto-start audio (browsers block AudioContext without a user gesture).
+  // Instead, prompt the user to click the button to resume.
+  if (pendingListen) {
+    listenToggle.classList.add('resume-hint');
+    listenLabel.textContent = '\u25C0 click to resume';
+    listenToggle.addEventListener('click', function resumeHint() {
+      listenToggle.classList.remove('resume-hint');
+      listenToggle.removeEventListener('click', resumeHint);
+    }, { once: true });
+  }
+
+  // ── Volume + pan controls (toolbar) ──
+  masterVol.addEventListener('input', function() {
+    if (engine) engine.setMasterVolume(parseInt(masterVol.value) / 100);
+    setVolumeEl.value = masterVol.value;
+    saveSettings();
+  });
+
+  autoPanToggle.addEventListener('change', function() {
+    if (engine) engine.setAutoPan(autoPanToggle.checked);
+    setAutoPanEl.checked = autoPanToggle.checked;
+    saveSettings();
+  });
+
+  // ── Highlight channel rows with active audio ──
+  function highlightAudioTG(tgid, active) {
+    var map = viewMode === 'frequency' ? freqChannels : activeChannels;
+    for (var entry of map.values()) {
+      if (entry.data.tgid === tgid) {
+        if (active) entry.row.classList.add('audio-active');
+        else entry.row.classList.remove('audio-active');
+      }
+    }
+  }
+
+  // Audio subscription is updated via onSystemFilterChange() which is the dropdown's onChange callback
+
+  // ── Expose for buildChannelCells (selection model) ──
+  window._omniAudio = {
+    isListening: function() { return listening; },
+    isMuted: function(tgid) { return !isTGSelected(tgid); },
+    toggleMute: function(tgid) {
+      // Toggle all composite keys matching this tgid
+      var wasSelected = isTGSelected(tgid);
+      for (var pair of tgCache) {
+        var compositeKey = pair[0];
+        if (parseInt(compositeKey.split(':')[1]) === tgid) {
+          if (wasSelected) selectedTGs.delete(compositeKey);
+          else selectedTGs.add(compositeKey);
+          if (engine) engine.setMute(compositeKey, wasSelected);
+        }
+      }
+      saveSelectedState();
+      updateSpeakerIcon(tgid);
+      updateTGListChecks();
+    }
+  };
+
+  // ── Unified update loop (250ms audio poll + 1s elapsed timer) ──
+  // Batches all periodic DOM writes into a single requestAnimationFrame per tick.
+  var lastElapsedTick = 0;
+  setInterval(function() {
+    var now = Date.now();
+    var doElapsed = (now - lastElapsedTick >= 1000);
+
+    // Audio poll (only when engine active)
+    var tgActivity = null, tgPan = null;
+    if (engine && listening) {
+      var active = engine.getActiveTGs();
+      tgActivity = new Map();
+      tgPan = new Map();
+      for (var i = 0; i < active.length; i++) {
+        tgActivity.set(active[i].tgid, active[i].lastActivity);
+        tgPan.set(active[i].tgid, active[i].pan);
+      }
+    }
+
+    // Batch all DOM writes into one rAF
+    requestAnimationFrame(function() {
+      var voiceCount = 0;
+      var channelMap = viewMode === 'frequency' ? freqChannels : activeChannels;
+      for (var entry of channelMap.values()) {
+        if (entry.fading) continue;
+        if (viewMode === 'frequency' && entry.idle) continue; // skip idle freq rows for elapsed/audio
+
+        // Elapsed timer (1s throttle)
+        if (doElapsed && entry.elapsedCell) {
+          var txt = formatElapsedMs(entry.startTimeMs);
+          if (txt !== entry.lastElapsedText) {
+            entry.lastElapsedText = txt;
+            entry.elapsedCell.textContent = txt;
+          }
+        }
+
+        // Audio activity + pan (only when engine running)
+        if (tgActivity && entry.row.style.display !== 'none') {
+          var lastAct = tgActivity.get(entry.data.tgid);
+          var hasVoice = !!(lastAct && (now - lastAct < 500));
+          if (hasVoice !== entry.wasAudioActive) {
+            entry.wasAudioActive = hasVoice;
+            if (hasVoice) entry.row.classList.add('audio-active');
+            else entry.row.classList.remove('audio-active');
+          }
+          if (hasVoice) {
+            entry.lastAudioTime = now;
+            voiceCount++;
+          }
+          var panVal = tgPan.get(entry.data.tgid);
+          if (panVal !== undefined && entry.panDot) {
+            var newLeft = (14 + panVal * 14) + 'px';
+            if (entry.panDot.style.left !== newLeft) entry.panDot.style.left = newLeft;
+          }
+        }
+      }
+
+      // Status text (skip if unchanged)
+      if (tgActivity) {
+        var selCount = selectedTGs.size;
+        if (voiceCount > 0) {
+          setAudioStatus(voiceCount + ' active (' + selCount + ' selected)', 'streaming');
+        } else if (selCount > 0) {
+          setAudioStatus('idle (' + selCount + ' selected)', '');
+        } else {
+          setAudioStatus('idle (none selected)', '');
+        }
+      }
+    });
+
+    if (doElapsed) lastElapsedTick = now;
+
+    // TG lifecycle (outside rAF — these trigger addAudioChannel which does its own DOM work)
+    if (engine && listening) {
+      var active = engine.getActiveTGs();
+      for (var j = 0; j < active.length; j++) {
+        if (now - active[j].lastActivity > 30000) {
+          engine._removeTG(active[j].tgid);
+        }
+      }
+    }
+  }, 250);
+
+  // ═══════════════════════════════════════════════════════════════
+  // SETTINGS DRAWER
+  // ═══════════════════════════════════════════════════════════════
+
+  function openSettings() {
+    renderTGList();
+    settingsOverlay.classList.add('open');
+    settingsPanel.classList.add('open');
+  }
+
+  function closeSettings() {
+    settingsOverlay.classList.remove('open');
+    settingsPanel.classList.remove('open');
+  }
+
+  settingsBtn.addEventListener('click', openSettings);
+  settingsClose.addEventListener('click', closeSettings);
+  settingsOverlay.addEventListener('click', closeSettings);
+
+  // ── TG List Rendering ──
+  function renderTGList(filter) {
+    while (tgListEl.firstChild) tgListEl.removeChild(tgListEl.firstChild);
+    var filterLower = (filter || tgSearchInput.value || '').toLowerCase();
+
+    // Group TGs by system
+    var bySystem = new Map();
+    for (var pair of tgCache) {
+      var parts = pair[0].split(':');
+      var sysId = parseInt(parts[0]);
+      var tgid = parseInt(parts[1]);
+      var meta = pair[1];
+      // Apply search filter
+      if (filterLower) {
+        var matchesTgid = String(tgid).indexOf(filterLower) !== -1;
+        var matchesTag = (meta.alpha_tag || '').toLowerCase().indexOf(filterLower) !== -1;
+        if (!matchesTgid && !matchesTag) continue;
+      }
+      if (!bySystem.has(sysId)) bySystem.set(sysId, []);
+      bySystem.get(sysId).push({ sysId: sysId, tgid: tgid, alpha_tag: meta.alpha_tag || '', group: meta.group || '' });
+    }
+
+    // Migrate legacy plain tgid selections to composite keys
+    if (_pendingLegacyTgids && bySystem.size > 0) {
+      bySystem.forEach(function(tgs, sysId) {
+        for (var i = 0; i < tgs.length; i++) {
+          if (_pendingLegacyTgids.has(String(tgs[i].tgid))) {
+            selectedTGs.add(sysId + ':' + tgs[i].tgid);
+          }
+        }
+      });
+      // Remove the old plain entries
+      _pendingLegacyTgids.forEach(function(t) { selectedTGs.delete(t); });
+      _pendingLegacyTgids = null;
+      saveSettings();
+    }
+
+    // Sort systems and TGs
+    var sortedSystems = Array.from(bySystem.keys()).sort(function(a, b) { return a - b; });
+    for (var s = 0; s < sortedSystems.length; s++) {
+      var sid = sortedSystems[s];
+      var sysName = systemNames.get(sid) || 'System ' + sid;
+      var tgs = bySystem.get(sid);
+      tgs.sort(function(a, b) { return a.tgid - b.tgid; });
+
+      // System header
+      var header = document.createElement('div');
+      header.className = 'tg-system-header';
+      header.textContent = sysName + ' (' + tgs.length + ')';
+      tgListEl.appendChild(header);
+
+      // TG items
+      for (var t = 0; t < tgs.length; t++) {
+        var tg = tgs[t];
+        var item = document.createElement('div');
+        item.className = 'tg-item';
+        var compositeKey = tg.sysId + ':' + tg.tgid;
+        item.dataset.tgid = String(tg.tgid);
+        item.dataset.key = compositeKey;
+
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selectedTGs.has(compositeKey);
+        item.appendChild(cb);
+
+        var tgidSpan = document.createElement('span');
+        tgidSpan.className = 'tg-item-tgid';
+        tgidSpan.textContent = String(tg.tgid);
+        item.appendChild(tgidSpan);
+
+        var tagSpan = document.createElement('span');
+        tagSpan.className = 'tg-item-tag';
+        tagSpan.textContent = tg.alpha_tag || '\u2014';
+        item.appendChild(tagSpan);
+
+        // Click handler (closure for composite key + plain tgid)
+        (function(key, tgid, checkbox) {
+          item.addEventListener('click', function(e) {
+            if (e.target === checkbox) {
+              if (checkbox.checked) selectedTGs.add(key);
+              else selectedTGs.delete(key);
+            } else {
+              if (selectedTGs.has(key)) {
+                selectedTGs.delete(key);
+                checkbox.checked = false;
+              } else {
+                selectedTGs.add(key);
+                checkbox.checked = true;
+              }
+            }
+            if (engine) engine.setMute(key, !selectedTGs.has(key));
+            saveSelectedState();
+            updateSpeakerIcon(tgid);
+          });
+        })(compositeKey, tg.tgid, cb);
+
+        tgListEl.appendChild(item);
+      }
+    }
+
+    if (tgListEl.children.length === 0) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'padding:16px;text-align:center;color:var(--text-faint);font-size:12px;';
+      empty.textContent = tgCache.size === 0 ? 'No talkgroups loaded yet' : 'No matches';
+      tgListEl.appendChild(empty);
+    }
+  }
+
+  function updateSpeakerIcon(tgid) {
+    var rows = document.querySelectorAll('.channel-row');
+    for (var i = 0; i < rows.length; i++) {
+      var spk = rows[i].querySelector('.spk-btn');
+      if (spk && parseInt(spk.dataset.tgid) === tgid) {
+        var muted = !isTGSelected(tgid);
+        spk.textContent = muted ? '\uD83D\uDD07' : '\uD83D\uDD0A';
+        spk.classList.toggle('muted', muted);
+      }
+    }
+  }
+
+  function updateTGListChecks() {
+    var items = tgListEl.querySelectorAll('.tg-item');
+    for (var i = 0; i < items.length; i++) {
+      var key = items[i].dataset.key;
+      var cb = items[i].querySelector('input[type="checkbox"]');
+      if (cb) cb.checked = selectedTGs.has(key);
+    }
+  }
+
+  // Search filter
+  tgSearchInput.addEventListener('input', function() {
+    renderTGList(tgSearchInput.value.trim());
+  });
+
+  // Select All / None
+  tgSelectAllBtn.addEventListener('click', function() {
+    for (var pair of tgCache) {
+      selectedTGs.add(pair[0]);
+      if (engine) engine.setMute(pair[0], false);
+    }
+    saveSelectedState();
+    renderTGList(tgSearchInput.value.trim());
+  });
+
+  tgSelectNoneBtn.addEventListener('click', function() {
+    var prev = Array.from(selectedTGs);
+    selectedTGs.clear();
+    for (var i = 0; i < prev.length; i++) {
+      if (engine) engine.setMute(prev[i], true);
+      var tgid = parseInt(String(prev[i]).split(':').pop());
+      updateSpeakerIcon(tgid);
+    }
+    saveSelectedState();
+    renderTGList(tgSearchInput.value.trim());
+  });
+
+  // ── Settings drawer: Audio controls ──
+  setVolumeEl.addEventListener('input', function() {
+    masterVol.value = setVolumeEl.value;
+    if (engine) engine.setMasterVolume(parseInt(setVolumeEl.value) / 100);
+    saveSettings();
+  });
+
+  setAutoPanEl.addEventListener('change', function() {
+    autoPanToggle.checked = setAutoPanEl.checked;
+    if (engine) engine.setAutoPan(setAutoPanEl.checked);
+    saveSettings();
+  });
+
+  // ── Settings drawer: Buffer size ──
+  setBufferSizeEl.addEventListener('change', function() {
+    bufferSizeSelect.value = setBufferSizeEl.value;
+    bufferSizeSelect.dispatchEvent(new Event('change'));
+    saveSettings();
+  });
+
+  // ── Settings drawer: Column visibility ──
+  var colToggles = document.querySelectorAll('[data-col]');
+  for (var ci = 0; ci < colToggles.length; ci++) {
+    colToggles[ci].addEventListener('change', function() {
+      var col = this.dataset.col;
+      if (this.checked) {
+        document.body.classList.remove('hide-col-' + col);
+      } else {
+        document.body.classList.add('hide-col-' + col);
+      }
+      saveSettings();
+    });
+  }
+})();
+</script>
+<script src="theme-engine.js?v=2"></script>
+</body>
+</html>

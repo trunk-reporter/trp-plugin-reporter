@@ -21,7 +21,7 @@ use axum::http::Method;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -133,14 +133,12 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/unit-tag-suggestions/{id}",
     "/unit-tag-suggestions/{id}/approve",
     "/unit-tag-suggestions/{id}/dismiss",
-    "/calls/{id}/transcription",
     "/calls/{id}/transcriptions",
     "/calls/{id}/transcribe",
     "/calls/{id}/transcription/verify",
     "/calls/{id}/transcription/reject",
     "/calls/{id}/transcription/exclude",
     "/transcriptions/search",
-    "/transcriptions/batch",
     "/transcriptions/queue",
     "/call-upload",
     "/call-groups",
@@ -156,7 +154,6 @@ pub const OUT_OF_SCOPE: &[&str] = &[
     "/console-messages",
     "/audio/live",
     "/audio/jitter",
-    "/query",
     "/admin/systems/merge",
     "/admin/maintenance",
     "/admin/transcribe-backfill",
@@ -221,7 +218,10 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}", get(calls::one))
         .route("/calls/{id}/audio", get(calls::audio))
         .route("/calls/{id}/frequencies", get(calls::call_frequencies))
-        .route("/calls/{id}/transmissions", get(calls::call_transmissions));
+        .route("/calls/{id}/transmissions", get(calls::call_transmissions))
+        .route("/calls/{id}/transcription", get(calls::transcription).fallback(not_implemented))
+        .route("/transcriptions/batch", get(calls::transcriptions_batch))
+        .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));
     }
@@ -232,6 +232,14 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .layer(middleware::from_fn_with_state(state.clone(), log_internal))
         .with_state(state)
+}
+
+/// `POST /query` is ad-hoc SQL, which tr-engine lets an operator turn off with a
+/// 403. Its pages take that 403 as "disabled" and carry on without history
+/// (the stream graph streams live events instead), so that is what the plugin
+/// answers, not the 501 that stops them.
+async fn query_forbidden() -> ApiError {
+    ApiError::Forbidden("ad-hoc SQL queries are not available in the Trunk Recorder Pro plugin".into())
 }
 
 async fn not_implemented(OriginalUri(uri): OriginalUri) -> ApiError {
@@ -275,13 +283,18 @@ fn param<'a>(q: &'a Query, name: &str) -> Option<&'a str> {
     q.get(name).map(|v| v.trim()).filter(|v| !v.is_empty())
 }
 
-/// `limit` (default 50, 1..=1000) and `offset` (default 0, ≥ 0).
+/// `limit` (default 50, at least 1; more than 1000 is taken as 1000, as
+/// tr-engine does: its calendar heatmap and daily overview ask for 50000)
+/// and `offset` (default 0, ≥ 0).
 pub fn pagination(q: &Query) -> Result<(u32, u32), ApiError> {
     let limit = match param(q, "limit") {
         None => 50,
-        Some(v) => {
-            v.parse::<u32>().ok().filter(|l| (1..=1000).contains(l)).ok_or_else(|| ApiError::InvalidParameter(format!("limit must be 1 to 1000, not {v}")))?
-        }
+        Some(v) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|l| *l >= 1)
+            .map(|l| l.min(1000))
+            .ok_or_else(|| ApiError::InvalidParameter(format!("limit must be 1 or more, not {v}")))?,
     };
     let offset = match param(q, "offset") {
         None => 0,
@@ -387,7 +400,9 @@ mod tests {
     #[test]
     fn parameters_parse_as_the_spec_says() {
         assert_eq!(pagination(&q(&[])).unwrap(), (50, 0));
-        assert!(pagination(&q(&[("limit", "0")])).is_err() && pagination(&q(&[("limit", "1001")])).is_err());
+        assert!(pagination(&q(&[("limit", "0")])).is_err() && pagination(&q(&[("limit", "-1")])).is_err());
+        assert_eq!(pagination(&q(&[("limit", "1001")])).unwrap(), (1000, 0), "over the maximum is the maximum, as tr-engine has it");
+        assert_eq!(pagination(&q(&[("limit", "50000")])).unwrap(), (1000, 0));
         assert_eq!(sort(&q(&[("sort", "-last_seen")]), "alpha_tag", &["alpha_tag", "last_seen"]).unwrap(), ("last_seen".into(), true));
         assert!(sort(&q(&[("sort", "bogus")]), "alpha_tag", &["alpha_tag"]).is_err());
         assert_eq!(ids(&q(&[("tgids", "1,2")]), &["tgid", "tgids"]), vec![1, 2]);
