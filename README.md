@@ -15,6 +15,11 @@ matches your system.
 
 It starts with the default settings below and needs no configuration.
 
+Upgrading from 0.1.0, when the plugin was named `reporter`: uninstall `reporter`
+in TRP first (both default to port 8092), and move its folder
+`plugin-data/reporter` to `plugin-data/trunk-reporter` before Trunk Reporter
+first starts, so it opens the history you have. The CHANGELOG has the steps.
+
 ## Settings
 
 | Setting | Default | Notes |

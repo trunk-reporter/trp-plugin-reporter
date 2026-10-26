@@ -4,6 +4,25 @@
 
 Phase 2: what the web pages need beyond phase 1.
 
+### Upgrading from 0.1.0
+
+The rename makes 0.2.0 a different plugin to TRP: it does not replace the
+`reporter` plugin, and it does not find that plugin's store. To keep your
+history:
+
+1. Uninstall the `reporter` plugin in TRP (both serve on port 8092 by default,
+   so the two cannot run side by side).
+2. Before Trunk Reporter starts for the first time, move the folder
+   `plugin-data/reporter` to `plugin-data/trunk-reporter` (beside TRP's config
+   file; see Serve mode in the README).
+3. Install `trunk-reporter`. Settings are not carried over: set them again on
+   the plugin's card.
+
+If Trunk Reporter has already started, it has made an empty store; stop it,
+delete `plugin-data/trunk-reporter`, move the old folder in, and start it again.
+
+### Changes
+
 - The plugin is now named `trunk-reporter` (crate, executable and release files).
 - Fifteen more of tr-engine's pages are served, 23 in all, and several pages that
   failed against the phase 1 API now work (the stream graph, scanners and daily

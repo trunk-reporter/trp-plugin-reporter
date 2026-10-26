@@ -190,3 +190,12 @@ async fn health_says_what_this_server_can_do() {
     assert_eq!((flag("transcriptions"), flag("live_audio"), flag("hub"), flag("recorders")), (false, true, false, true));
     assert_eq!((flag("call_groups"), flag("directory"), flag("users")), (false, false, false));
 }
+
+#[test]
+fn the_examples_added_for_phase_2_match_their_schemas() {
+    for name in ["Features", "ActiveTalkgroupListResponse"] {
+        let example = &spec()["components"]["schemas"][name]["example"];
+        assert!(!example.is_null(), "{name} has no example");
+        assert_schema(&serde_json::to_value(example).unwrap(), name);
+    }
+}

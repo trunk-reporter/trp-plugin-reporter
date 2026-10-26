@@ -150,7 +150,7 @@ playback if enabled. The window ceiling is seven days; longer spans are asked fo
 
 **Marks on lanes:** emergency (always visible), affiliation join/leave of a followed radio (from
 the radio's events), first time a radio was heard on this talkgroup (a transmission whose radio's
-`first_seen` on that talkgroup, from the talkgroup's units, falls inside the window), encrypted
+`first_seen_on_talkgroup`, from the talkgroup's units, falls inside the window), encrypted
 calls as hollow bars.
 
 **Playhead and merged playback.** Play runs the calls of all drawn lanes in time order, skipping
@@ -248,11 +248,11 @@ contract:
 
 | Endpoint | For | Notes |
 |---|---|---|
-| `GET /health` `features` | capability gating | `transcriptions`, `live_audio`, `hub`, `sites` |
-| `GET /stats/talkgroup-activity` | density lanes, Live's activity charts | extended additively: `start`, `end`, `interval` (10, 30, 60, 300, 900, 3600 s), optional `tgids` and `system_id`; returns one series per talkgroup, `[bucket_start, calls, seconds]`, capped at 10,000 buckets per request. Without `interval` it answers as the spec does today |
-| `GET /talkgroups/active?start&end` | "active in this window" | ordered by calls, with counts |
-| `GET /units/{id}/talkgroups?start&end` | "follow a radio" | talkgroups the unit talked on, with counts |
-| `GET /talkgroups/{id}/units` `first_seen` | first-heard marks | per unit, first time heard on that talkgroup (additive field) |
+| `GET /health` `features` | capability gating | `transcriptions`, `live_audio`, `hub`, `recorders`, `call_groups`, `directory`, `users` (as in Constraints) |
+| `GET /stats/talkgroup-activity` | density lanes, Live's activity charts | extended additively: `after`, `before` (RFC 3339; `start`, `end` are accepted as aliases), `interval` (10, 30, 60, 300, 900, 3600 s), optional `tgids` and `system_id`, `call_state` (default `COMPLETED`, meaning every finished call, recorded or not; empty for every state), `sort` (`calls`, `duration`, `tgid`), `limit`/`offset`; with `interval` each item of the page carries `buckets`, objects `{time, calls, seconds}` (non-empty buckets only). The cap is 10,000 buckets per answer, counted per page: the page's talkgroups times `ceil(window / interval)`. Without `interval` it answers as the spec does today |
+| `GET /talkgroups/active?after&before` | "active in this window" | ordered by calls, with counts (`start`/`end` accepted as aliases) |
+| `GET /units/{id}/talkgroups?after&before` | "follow a radio" | talkgroups the unit talked on, with counts (`start`/`end` accepted as aliases) |
+| `GET /talkgroups/{id}/units` `first_seen_on_talkgroup` | first-heard marks | per unit, first time heard on that talkgroup (additive field) |
 | `GET /first-heard?since` | Live's first-heard list | talkgroups and units with first-seen in range |
 | `GET /stats/baseline?window&days&system_id` | up/down indicator | one request: for every talkgroup active in the trailing `window` seconds, the mean calls in the same clock window on the previous `days` days; equal widths, never a minute against an hour |
 | `GET/PUT /preferences/{key}` | colour rules, favourites, monitors, priorities | JSON document per key, in the store |

@@ -3495,7 +3495,10 @@ paths:
         4. Client sends `{"type": "unsubscribe"}` to stop receiving audio.
 
         **Binary audio frames (server → client):**
-        Each binary frame contains a 12-byte header followed by audio data:
+        Each binary frame contains a 12-byte header followed by audio data
+        (this table is tr-engine's Opus-capable server; this plugin sends
+        the 14-byte PCM frame described under "In the Trunk Recorder Pro
+        plugin" below):
 
         | Offset | Size | Type | Field |
         |--------|------|------|-------|
@@ -6384,6 +6387,14 @@ components:
       type: object
       description: What this server can do, so a client can hide what would not work.
       required: [transcriptions, live_audio, hub, recorders, call_groups, directory, users]
+      example:
+        transcriptions: false
+        live_audio: true
+        hub: false
+        recorders: true
+        call_groups: false
+        directory: false
+        users: false
       properties:
         transcriptions:
           type: boolean
@@ -6889,6 +6900,19 @@ components:
     ActiveTalkgroupListResponse:
       type: object
       required: [talkgroups, after, before]
+      example:
+        talkgroups:
+          - system_id: 3
+            system_name: "MARCS"
+            tgid: 9178
+            tg_alpha_tag: "09-8L Main"
+            tg_tag: "Law Dispatch"
+            tg_group: "Butler County (09) Law"
+            calls: 12
+            seconds: 94.5
+            last_call: "2026-03-01T14:05:00.000Z"
+        after: "2026-03-01T13:58:00.000Z"
+        before: "2026-03-01T14:08:00.000Z"
       properties:
         talkgroups:
           type: array
