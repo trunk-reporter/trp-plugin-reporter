@@ -206,6 +206,7 @@ pub fn router(state: AppState) -> Router {
         .route("/p25-systems", get(systems::p25))
         .route("/talkgroups", get(talkgroups::list))
         .route("/talkgroups/encryption-stats", get(talkgroups::encryption_stats))
+        .route("/talkgroups/active", get(talkgroups::active))
         .route("/talkgroups/{id}", get(talkgroups::one).patch(not_implemented))
         .route("/talkgroups/{id}/units", get(talkgroups::units))
         .route("/talkgroups/{id}/calls", get(calls::talkgroup_calls))

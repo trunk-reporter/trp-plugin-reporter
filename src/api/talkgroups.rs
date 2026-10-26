@@ -6,11 +6,13 @@ use axum::Json;
 use axum::extract::{Path, Query as QueryParams, State};
 use rusqlite::Connection;
 
-use super::types::{EncryptionStat, EncryptionStatsResponse, Talkgroup, TalkgroupListResponse, Unit, UnitListResponse};
-use super::{ApiError, AppState, Query, composite, ids, pagination, sort, sysids};
+use super::types::{
+    ActiveTalkgroup, ActiveTalkgroupListResponse, EncryptionStat, EncryptionStatsResponse, Talkgroup, TalkgroupListResponse, Unit, UnitListResponse,
+};
+use super::{ApiError, AppState, Query, composite, ids, pagination, rfc3339, sort, sysids, window};
 use crate::store::systems::{SystemRow, list_systems};
 use crate::store::talkgroups::{
-    TalkgroupFilter, TalkgroupRow, TgSort, encryption_stats as encryption_rows, list_talkgroups, talkgroup, talkgroups_by_tgid, tg_alpha_tag,
+    TalkgroupFilter, TalkgroupRow, TgSort, active_in_window, encryption_stats as encryption_rows, list_talkgroups, talkgroup, talkgroups_by_tgid, tg_alpha_tag,
     units_on_talkgroup,
 };
 use crate::store::{StoreError, SystemId, now_ms};
@@ -165,4 +167,18 @@ pub async fn encryption_stats(State(state): State<AppState>, QueryParams(q): Que
     })
     .await?;
     Ok(Json(body))
+}
+
+/// `GET /talkgroups/active`: the talkgroups with calls started in the window (default: the last ten minutes).
+pub async fn active(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<ActiveTalkgroupListResponse>, ApiError> {
+    let now = now_ms();
+    let (after, before) = window(&q, now - 10 * MINUTE_MS, now)?;
+    let (limit, _) = pagination(&q)?;
+    let system_ids = ids(&q, &["system_id", "systems"]);
+    let talkgroups = blocking(&state, move |c| {
+        let rows = active_in_window(c, &system_ids, after, before, limit).map_err(StoreError::from)?;
+        Ok(rows.iter().map(ActiveTalkgroup::from_row).collect())
+    })
+    .await?;
+    Ok(Json(ActiveTalkgroupListResponse { talkgroups, after: rfc3339(after), before: rfc3339(before) }))
 }

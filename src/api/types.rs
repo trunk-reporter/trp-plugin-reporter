@@ -15,7 +15,7 @@ use crate::store::recorder::RecorderStateRow;
 use crate::store::stats::{ActivityBucketRow, ActivityRow, TalkgroupActivityRow};
 use crate::store::systems::{SiteRow, SystemRow};
 use crate::store::systems::{site_by_id, system_by_id};
-use crate::store::talkgroups::{EncryptionStatRow, TalkgroupRow};
+use crate::store::talkgroups::{ActiveTalkgroupRow, EncryptionStatRow, TalkgroupRow};
 use crate::store::units::unit;
 use crate::store::units::{UnitEventRow, UnitRow};
 use crate::store::{StoreError, now_ms};
@@ -838,6 +838,44 @@ impl ActivityBucket {
     pub fn from_row(row: &ActivityBucketRow) -> ActivityBucket {
         ActivityBucket { time: rfc3339(row.start_ms), calls: row.calls, seconds: row.seconds }
     }
+}
+
+/// The spec's `ActiveTalkgroup`: one talkgroup's calls in a window.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ActiveTalkgroup {
+    pub system_id: i64,
+    pub system_name: String,
+    pub tgid: u32,
+    pub tg_alpha_tag: String,
+    pub tg_tag: String,
+    pub tg_group: String,
+    pub calls: i64,
+    pub seconds: f64,
+    pub last_call: String,
+}
+
+impl ActiveTalkgroup {
+    pub fn from_row(row: &ActiveTalkgroupRow) -> ActiveTalkgroup {
+        ActiveTalkgroup {
+            system_id: row.system_id,
+            system_name: row.system_name.clone(),
+            tgid: row.tgid,
+            tg_alpha_tag: row.alpha_tag.clone(),
+            tg_tag: row.tag.clone(),
+            tg_group: row.group.clone(),
+            calls: row.calls,
+            seconds: row.seconds,
+            last_call: rfc3339(row.last_call_ms),
+        }
+    }
+}
+
+/// The body of `GET /talkgroups/active`; `after` and `before` are the window used.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ActiveTalkgroupListResponse {
+    pub talkgroups: Vec<ActiveTalkgroup>,
+    pub after: String,
+    pub before: String,
 }
 
 /// The spec's `TalkgroupActivity`; `buckets` is there when the request asked for an `interval`.

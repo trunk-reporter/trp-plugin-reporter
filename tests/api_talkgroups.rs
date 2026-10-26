@@ -138,3 +138,81 @@ async fn encryption_stats_count_clear_and_encrypted() {
     let (st, _) = get(&app, "/api/v1/talkgroups/encryption-stats?hours=0").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn active_talkgroups_are_those_with_calls_in_the_window() {
+    let (app, store, _, _) = app();
+    let s = seed(&store);
+    // Talkgroup 555 has no talkgroups row: two calls, the latest a minute ago.
+    store
+        .write_sync(move |c| {
+            for (ago, len) in [(60_000, 3_000), (120_000, 4_000)] {
+                c.execute(
+                    "INSERT INTO calls (system_id, tgid, start_ms, end_ms, state) VALUES (?1, 555, ?2, ?3, 'concluded')",
+                    rusqlite::params![s.sys1.0, s.now - ago, s.now - ago + len],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (after, before) = (s.now - 4 * 3_600_000, s.now + 1_000);
+    let (after_s, before_s) = (trunk_reporter::api::rfc3339(after), trunk_reporter::api::rfc3339(before));
+    let url = format!("/api/v1/talkgroups/active?after={after_s}&before={before_s}");
+    let (st, v) = get(&app, &url).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "ActiveTalkgroupListResponse");
+    // Busiest first, ties by the later last call; c4 (5 h ago) and older are outside.
+    let rows: Vec<_> = v["talkgroups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["tgid"].as_i64().unwrap(), t["calls"].as_i64().unwrap(), t["seconds"].as_f64().unwrap()))
+        .collect();
+    assert_eq!(rows, vec![(555, 2, 7.0), (101, 2, 20.0), (202, 1, 20.0)]);
+    let unnamed = &v["talkgroups"][0];
+    assert_schema(unnamed, "ActiveTalkgroup");
+    assert_eq!((unnamed["tg_alpha_tag"].as_str(), unnamed["tg_tag"].as_str(), unnamed["tg_group"].as_str()), (Some(""), Some(""), Some("")));
+    assert_eq!(unnamed["system_id"].as_i64(), Some(s.sys1.0));
+    let named = &v["talkgroups"][1];
+    assert_eq!((named["tg_alpha_tag"].as_str(), named["tg_tag"].as_str(), named["tg_group"].as_str()), (Some("Fire Disp"), Some("Dispatch"), Some("Fire")));
+    assert_eq!(named["system_name"], "ohmarcs");
+    assert!(named["last_call"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(
+        (v["after"].as_str().map(str::to_owned), v["before"].as_str().map(str::to_owned)),
+        (Some(trunk_reporter::api::rfc3339(after)), Some(trunk_reporter::api::rfc3339(before)))
+    );
+
+    // The window is half open, the limit cuts, the system filter filters.
+    let (_, v) = get(&app, &format!("/api/v1/talkgroups/active?after={after_s}&before={}", trunk_reporter::api::rfc3339(s.now - 10 * 60_000))).await;
+    assert_eq!(v["talkgroups"].as_array().unwrap().iter().map(|t| t["tgid"].as_i64().unwrap()).collect::<Vec<_>>(), vec![101, 202]);
+    let (_, v) = get(&app, &format!("{url}&limit=1")).await;
+    assert_eq!(v["talkgroups"].as_array().unwrap().len(), 1);
+    let (_, v) = get(&app, &format!("{url}&system_id={}", s.sys2.0)).await;
+    assert_eq!(v["talkgroups"].as_array().unwrap().len(), 0);
+    let (st, _) = get(&app, &format!("/api/v1/talkgroups/active?after={before_s}&before={after_s}")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn active_talkgroups_default_window_is_ten_minutes() {
+    let (app, store, _, _) = app();
+    let now = trunk_reporter::store::now_ms();
+    store
+        .write_sync(move |c| {
+            let sys = trunk_reporter::store::systems::ensure_system(c, "sys1", "p25", "", now - 3_600_000)?;
+            for (tgid, ago) in [(11, 5 * 60_000), (22, 20 * 60_000)] {
+                c.execute(
+                    "INSERT INTO calls (system_id, tgid, start_ms, end_ms, state) VALUES (?1, ?2, ?3, ?3, 'concluded')",
+                    rusqlite::params![sys.0, tgid, now - ago],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (st, v) = get(&app, "/api/v1/talkgroups/active").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_schema(&v, "ActiveTalkgroupListResponse");
+    assert_eq!(v["talkgroups"].as_array().unwrap().iter().map(|t| t["tgid"].as_i64().unwrap()).collect::<Vec<_>>(), vec![11]);
+    let parse = |k: &str| time::OffsetDateTime::parse(v[k].as_str().unwrap(), &time::format_description::well_known::Rfc3339).unwrap();
+    assert_eq!((parse("before") - parse("after")).whole_seconds(), 600);
+}

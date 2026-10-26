@@ -1053,6 +1053,54 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /talkgroups/active:
+    get:
+      operationId: getActiveTalkgroups
+      summary: Talkgroups active in a time window
+      description: |
+        Returns the talkgroups with calls that started in `[after, before)`,
+        busiest first (ties: latest call first). Talkgroups with no stored
+        row are included, with empty names. Defaults to the last ten minutes.
+      tags: [talkgroups]
+      parameters:
+        - name: after
+          in: query
+          description: Start of the window. Defaults to ten minutes ago.
+          schema:
+            type: string
+            format: date-time
+        - name: before
+          in: query
+          description: End of the window, exclusive. Defaults to now.
+          schema:
+            type: string
+            format: date-time
+        - name: system_id
+          in: query
+          description: Filter by system database ID (comma-separated for multiple)
+          schema:
+            type: string
+            example: "1,2"
+        - name: limit
+          in: query
+          description: Most talkgroups to return (1 to 1000)
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveTalkgroupListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ----------------------------------------------------------
   # Talkgroup Directory
   # ----------------------------------------------------------
@@ -6511,6 +6559,59 @@ components:
           type: integer
           description: Control channel frequency (Hz)
           example: 859562500
+
+    ActiveTalkgroupListResponse:
+      type: object
+      required: [talkgroups, after, before]
+      properties:
+        talkgroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActiveTalkgroup"
+        after:
+          type: string
+          format: date-time
+          description: Start of the window used
+        before:
+          type: string
+          format: date-time
+          description: End of the window used (exclusive)
+
+    ActiveTalkgroup:
+      type: object
+      required: [system_id, system_name, tgid, tg_alpha_tag, tg_tag, tg_group, calls, seconds, last_call]
+      properties:
+        system_id:
+          type: integer
+          example: 3
+        system_name:
+          type: string
+          example: "MARCS"
+        tgid:
+          type: integer
+          example: 9178
+        tg_alpha_tag:
+          type: string
+          example: "09-8L Main"
+        tg_tag:
+          type: string
+          example: "Law Dispatch"
+        tg_group:
+          type: string
+          example: "Butler County (09) Law"
+        calls:
+          type: integer
+          description: Calls that started in the window
+          example: 12
+        seconds:
+          type: number
+          description: Total duration in seconds of those calls
+          example: 94.5
+        last_call:
+          type: string
+          format: date-time
+          description: Start of the latest of those calls
+          example: "2026-03-01T14:05:00.000Z"
 
     TalkgroupActivity:
       type: object

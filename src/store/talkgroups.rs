@@ -371,6 +371,49 @@ pub fn encryption_stats(conn: &Connection, since_ms: i64, system_ids: &[i64]) ->
         .collect()
 }
 
+/// One talkgroup's calls in a window. Names are empty when the talkgroup or system has no row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveTalkgroupRow {
+    pub system_id: i64,
+    pub system_name: String,
+    pub tgid: u32,
+    pub alpha_tag: String,
+    pub tag: String,
+    pub group: String,
+    pub calls: i64,
+    /// Seconds of call time; a call still open counts 0.
+    pub seconds: f64,
+    pub last_call_ms: i64,
+}
+
+/// The talkgroups with calls started in `[after_ms, before_ms)`, busiest first, then latest call first.
+/// `system_ids` empty is every system. A system's name is its `name`, else its short name.
+pub fn active_in_window(conn: &Connection, system_ids: &[i64], after_ms: i64, before_ms: i64, limit: u32) -> rusqlite::Result<Vec<ActiveTalkgroupRow>> {
+    let filter = if system_ids.is_empty() {
+        String::new()
+    } else {
+        format!(" AND c.system_id IN ({})", system_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","))
+    };
+    let sql = format!(
+        "SELECT c.system_id, COALESCE(NULLIF(s.name, ''), s.short_name, ''), c.tgid, COALESCE(t.alpha_tag, ''), COALESCE(t.tag, ''), COALESCE(t.\"group\", ''),                 COUNT(*) AS n, SUM((COALESCE(c.end_ms, c.start_ms) - c.start_ms) / 1000.0), MAX(c.start_ms) AS last          FROM calls c LEFT JOIN talkgroups t ON t.system_id = c.system_id AND t.tgid = c.tgid LEFT JOIN systems s ON s.id = c.system_id          WHERE c.start_ms >= :after AND c.start_ms < :before{filter}          GROUP BY c.system_id, c.tgid ORDER BY n DESC, last DESC, c.tgid, c.system_id LIMIT :limit"
+    );
+    conn.prepare(&sql)?
+        .query_map(named_params! { ":after": after_ms, ":before": before_ms, ":limit": limit }, |r| {
+            Ok(ActiveTalkgroupRow {
+                system_id: r.get(0)?,
+                system_name: r.get(1)?,
+                tgid: r.get(2)?,
+                alpha_tag: r.get(3)?,
+                tag: r.get(4)?,
+                group: r.get(5)?,
+                calls: r.get(6)?,
+                seconds: r.get(7)?,
+                last_call_ms: r.get(8)?,
+            })
+        })?
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
