@@ -262,13 +262,29 @@ async fn talkgroup_activity_buckets_by_interval() {
 #[tokio::test]
 async fn too_many_buckets_is_a_400() {
     let (app, store, _, _) = app();
-    seed(&store);
+    let s = seed(&store);
     let (st, v) = get(&app, "/api/v1/stats/talkgroup-activity?after=2020-01-01T00:00:00Z&interval=10").await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")));
     assert!(v["error"].as_str().unwrap().contains("at most 10000"), "{v}");
-    // The same window in hour buckets is within the cap only if few talkgroups were heard: 2 here, ~58 000 hours.
-    let (st, _) = get(&app, "/api/v1/stats/talkgroup-activity?after=2026-01-01T00:00:00Z&interval=3600&tgid=101").await;
+    // The cap is talkgroups x ceil(window / interval), with explicit times so the clock does not matter.
+    // One talkgroup (101), 10 s buckets: a window of exactly 10 000 buckets passes, one ms more is 10 001.
+    let after = s.now - HOUR;
+    let url = |tgids: &str, len_ms: i64| {
+        format!("/api/v1/stats/talkgroup-activity?interval=10&tgids={tgids}&after={}&before={}", rfc3339(after), rfc3339(after + len_ms))
+    };
+    let (st, _) = get(&app, &url("101", 100_000_000)).await;
     assert_eq!(st, StatusCode::OK);
+    let (st, v) = get(&app, &url("101", 100_000_001)).await;
+    assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_parameter")));
+    assert!(v["error"].as_str().unwrap().contains("too many buckets: 10001,"), "{v}");
+    // Two talkgroups (101 and 202, heard in the last 4 h): 5 000 buckets each is the limit.
+    let after = s.now - 4 * HOUR;
+    let url = |len_ms: i64| format!("/api/v1/stats/talkgroup-activity?interval=10&tgids=101,202&after={}&before={}", rfc3339(after), rfc3339(after + len_ms));
+    let (st, _) = get(&app, &url(50_000_000)).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = get(&app, &url(50_000_001)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("too many buckets: 10002,"), "{v}");
 }
 
 #[tokio::test]
