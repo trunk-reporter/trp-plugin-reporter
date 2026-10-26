@@ -1,18 +1,15 @@
-# Reporter
+# Trunk Reporter
 
-Reporter is a [Trunk Recorder Pro](https://github.com/TrunkRecorder/trunk-recorder-pro)
+Trunk Reporter is a [Trunk Recorder Pro](https://github.com/TrunkRecorder/trunk-recorder-pro)
 plugin that brings [tr-engine](https://github.com/trunk-reporter/tr-engine)'s
 call history, REST API and web pages to Trunk Recorder Pro (TRP). It keeps
 calls, units, talkgroups and affiliations in a SQLite file in the plugin's own
 folder and serves them from the plugin process. There is no database, broker or
 second service to run.
 
-"Reporter" is the working name; the final plugin id is the project owner's
-choice.
-
 ## Install
 
-Once Reporter is listed, install it from the Plugins page in TRP. Until then,
+Once Trunk Reporter is listed, install it from the Plugins page in TRP. Until then,
 use "Add from a file", or give TRP a GitHub release URL for the archive that
 matches your system.
 
@@ -38,7 +35,7 @@ It starts with the default settings below and needs no configuration.
 
 ## Serve mode
 
-Reporter can serve the history without the recorder running:
+Trunk Reporter can serve the history without the recorder running:
 
 ```sh
 trunk-reporter serve <data-dir>
