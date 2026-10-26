@@ -2,6 +2,7 @@
 //! single writing connection; a small pool of other connections serves reads.
 
 pub mod calls;
+pub mod preferences;
 pub mod recorder;
 pub mod stats;
 pub mod systems;

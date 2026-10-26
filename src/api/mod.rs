@@ -4,6 +4,7 @@
 pub mod calls;
 mod cors;
 pub mod health;
+pub mod preferences;
 pub mod sse;
 pub mod stats;
 pub mod systems;
@@ -187,6 +188,7 @@ pub const SERVED_PREFIXES: &[&str] = &[
     "recorders",
     "first-heard",
     "events",
+    "preferences",
     "pages",
     "openapi.yaml",
 ];
@@ -233,6 +235,7 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}/transmissions", get(calls::call_transmissions))
         .route("/calls/{id}/transcription", get(calls::transcription).fallback(not_implemented))
         .route("/transcriptions/batch", get(calls::transcriptions_batch))
+        .route("/preferences/{key}", get(preferences::get).put(preferences::put))
         .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));

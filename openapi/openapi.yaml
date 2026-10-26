@@ -143,6 +143,8 @@ tags:
     description: Authentication, user management, and API key operations
   - name: admin
     description: Administrative operations (system merge, cleanup)
+  - name: preferences
+    description: Server-side settings documents for the web app
 
 # ============================================================
 # PATHS
@@ -4241,6 +4243,71 @@ paths:
               schema:
                 $ref: "#/components/schemas/PurgeResponse"
 
+  /preferences/{key}:
+    get:
+      operationId: getPreference
+      summary: Get a stored preference
+      description: Returns the JSON document stored under the key (server-side settings for the web app).
+      tags: [preferences]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Preference key (lowercase letters, digits and hyphens; 1-64 characters, not starting with a hyphen)
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+            example: colour-rules
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Preference"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      operationId: putPreference
+      summary: Store a preference
+      description: Stores a JSON object (at most 256 KiB) under the key, replacing any earlier one.
+      tags: [preferences]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Preference key (lowercase letters, digits and hyphens; 1-64 characters, not starting with a hyphen)
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+            example: colour-rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Preference"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 # ============================================================
 # COMPONENTS
 # ============================================================
@@ -7764,3 +7831,25 @@ components:
           type: string
           description: "Always present, reminding that this action is irreversible"
           example: "This action is irreversible."
+
+    Preference:
+      type: object
+      required: [key, value, updated_at]
+      properties:
+        key:
+          type: string
+          example: colour-rules
+        value:
+          type: object
+          additionalProperties: true
+          description: The stored JSON document
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        key: colour-rules
+        value:
+          rules:
+            - tgid: 9178
+              colour: "#ff0000"
+        updated_at: "2026-10-25T13:58:02.000Z"

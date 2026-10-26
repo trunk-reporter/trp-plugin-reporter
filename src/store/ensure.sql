@@ -21,3 +21,4 @@ BEGIN
 END;
 -- Computed once, when the key is missing (a new store, or one from before the triggers).
 INSERT OR IGNORE INTO meta (key, value) SELECT 'total_length_ms', COALESCE(SUM(length_ms), 0) FROM calls;
+CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, json TEXT NOT NULL, updated_ms INTEGER NOT NULL);

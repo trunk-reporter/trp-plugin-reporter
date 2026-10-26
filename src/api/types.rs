@@ -393,6 +393,14 @@ pub struct FirstHeardResponse {
     pub units: Vec<Unit>,
 }
 
+/// The spec's `Preference`: a settings document and when it was stored.
+#[derive(Serialize)]
+pub struct Preference {
+    pub key: String,
+    pub value: serde_json::Value,
+    pub updated_at: String,
+}
+
 /// The spec's `UnitEvent`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnitEvent {
