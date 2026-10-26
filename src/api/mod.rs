@@ -235,7 +235,7 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}/transmissions", get(calls::call_transmissions))
         .route("/calls/{id}/transcription", get(calls::transcription).fallback(not_implemented))
         .route("/transcriptions/batch", get(calls::transcriptions_batch))
-        .route("/preferences/{key}", get(preferences::get).put(preferences::put))
+        .route("/preferences/{key}", get(preferences::get).put(preferences::put).layer(axum::extract::DefaultBodyLimit::max(preferences::MAX_BYTES + 1)))
         .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {
         api = api.route(path, any(not_implemented));

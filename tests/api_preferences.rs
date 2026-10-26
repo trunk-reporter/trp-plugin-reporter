@@ -63,6 +63,11 @@ async fn a_bad_key_or_body_is_a_400() {
     let big = format!("{{\"a\":\"{}\"}}", "x".repeat(256 * 1024));
     let (s, v) = put(&app, "/api/v1/preferences/k", big.into_bytes(), &[]).await;
     assert_eq!((s.as_u16(), v["code"].as_str()), (400, Some("bad_request")));
+    // Past axum's own 2 MiB default too: still the spec's 400, not a plain-text 413.
+    let huge = format!("{{\"a\":\"{}\"}}", "x".repeat(3 * 1024 * 1024));
+    let (s, v) = put(&app, "/api/v1/preferences/k", huge.into_bytes(), &[]).await;
+    assert_eq!((s.as_u16(), v["code"].as_str()), (400, Some("bad_request")));
+    assert_schema(&v, "Error");
     // Exactly the cap is fine.
     let exact = format!("{{\"a\":\"{}\"}}", "x".repeat(256 * 1024 - 8));
     assert_eq!(exact.len(), 256 * 1024);

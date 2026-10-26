@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path, State};
 use regex::Regex;
 use serde_json::Value;
@@ -15,7 +16,7 @@ use crate::store::now_ms;
 use crate::store::preferences::{get_preference, put_preference};
 
 /// The largest document a PUT may carry.
-const MAX_BYTES: usize = 256 * 1024;
+pub const MAX_BYTES: usize = 256 * 1024;
 
 static KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,63}$").expect("regex"));
 
@@ -43,8 +44,10 @@ pub async fn get(State(state): State<AppState>, Path(key): Path<String>) -> Resu
     Ok(Json(body))
 }
 
-pub async fn put(State(state): State<AppState>, Path(key): Path<String>, body: Bytes) -> Result<Json<Preference>, ApiError> {
+pub async fn put(State(state): State<AppState>, Path(key): Path<String>, body: Result<Bytes, BytesRejection>) -> Result<Json<Preference>, ApiError> {
     check_key(&key)?;
+    // A body over the route's cap is a rejection, not a short read: answer it as the spec's 400.
+    let body = body.map_err(|_| ApiError::BadRequest(format!("the body must be at most {MAX_BYTES} bytes")))?;
     if body.len() > MAX_BYTES {
         return Err(ApiError::BadRequest(format!("the body must be at most {MAX_BYTES} bytes")));
     }
