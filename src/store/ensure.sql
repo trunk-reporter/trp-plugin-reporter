@@ -3,6 +3,8 @@
 
 -- Talkgroup statistics count a talkgroup's units from its events.
 CREATE INDEX IF NOT EXISTS unit_events_tg_time ON unit_events(system_id, tgid, time_ms);
+-- A unit's first event on a talkgroup (/talkgroups/{id}/units) is a seek here.
+CREATE INDEX IF NOT EXISTS unit_events_unit_tg_time ON unit_events(system_id, unit, tgid, time_ms);
 
 -- `meta.total_length_ms` is the running SUM(calls.length_ms) that /stats shows,
 -- kept by these triggers on every insert, update and delete of a call.

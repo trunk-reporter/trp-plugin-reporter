@@ -143,13 +143,14 @@ fn stat_sql(stat: Stat, cutoff: usize) -> String {
     };
     match stat {
         Stat::Calls30d | Stat::Calls1h | Stat::Calls24h => calls(cutoff),
-        // The events branch seeks `unit_events_tg_time`.
+        // The events branch seeks `unit_events_tg_time`. It is named: for the UNION's order by unit,
+        // SQLite would otherwise walk the whole system in `unit_events_unit_tg_time`.
         Stat::Units30d => format!(
             "(SELECT COUNT(*) FROM (\
                 SELECT t.unit FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
                   WHERE c.system_id = talkgroups.system_id AND c.tgid = talkgroups.tgid AND c.start_ms > ?{cutoff} \
                 UNION \
-                SELECT e.unit FROM unit_events e \
+                SELECT e.unit FROM unit_events e INDEXED BY unit_events_tg_time \
                   WHERE e.system_id = talkgroups.system_id AND e.tgid = talkgroups.tgid AND e.time_ms > ?{cutoff}))"
         ),
     }
@@ -323,6 +324,42 @@ pub fn first_heard_talkgroups(conn: &Connection, system_ids: &[i64], since_ms: i
     Ok(rows)
 }
 
+/// The units of one talkgroup in the window, with their calls there: `?1` system, `?2` tgid, `?3` since.
+/// The events leg names `unit_events_tg_time` so that its DISTINCT never walks the system by unit.
+const UNITS_ACTIVE: &str = "WITH tx AS (\
+            SELECT t.unit AS unit, COUNT(DISTINCT c.id) AS n FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
+            WHERE c.system_id = ?1 AND c.tgid = ?2 AND c.start_ms >= ?3 GROUP BY t.unit), \
+         active AS (\
+            SELECT unit, n FROM tx \
+            UNION ALL \
+            SELECT DISTINCT unit, 0 FROM unit_events INDEXED BY unit_events_tg_time WHERE system_id = ?1 AND tgid = ?2 AND time_ms >= ?3 AND unit NOT IN (SELECT unit FROM tx))";
+
+/// A page of [`UNITS_ACTIVE`] (`?4` limit, `?5` offset), with when each unit was first heard on the
+/// talkgroup: the earlier of its first event and its first transmission there, either alone when the
+/// other is absent, and its first time anywhere only when it has neither.
+///
+/// Both look-ups are made once per unit of the page, and from the unit's side: its events through
+/// `unit_events_unit_tg_time`, its transmissions in time order through `call_transmissions_unit`
+/// (stopping at the first on the talkgroup), so neither walks the talkgroup's history.
+fn units_on_talkgroup_sql() -> String {
+    let cols = UNIT_COLS.split(", ").map(|c| format!("u.{c}")).collect::<Vec<_>>().join(", ");
+    format!(
+        "{UNITS_ACTIVE}, \
+         page AS MATERIALIZED (\
+            SELECT active.unit AS unit, active.n AS n FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit \
+            ORDER BY active.n DESC, active.unit LIMIT ?4 OFFSET ?5), \
+         here AS MATERIALIZED (\
+            SELECT page.unit AS unit, page.n AS n, \
+                (SELECT MIN(e.time_ms) FROM unit_events e WHERE e.system_id = ?1 AND e.unit = page.unit AND e.tgid = ?2) AS ev, \
+                (SELECT t.time_ms FROM call_transmissions t CROSS JOIN calls c ON c.id = t.call_id \
+                 WHERE t.unit = page.unit AND c.system_id = ?1 AND c.tgid = ?2 ORDER BY t.time_ms LIMIT 1) AS tx \
+            FROM page) \
+         SELECT {cols}, here.n, COALESCE(MIN(COALESCE(here.ev, here.tx), COALESCE(here.tx, here.ev)), u.first_seen_ms) AS first_here \
+         FROM here JOIN units u ON u.system_id = ?1 AND u.unit_id = here.unit \
+         ORDER BY here.n DESC, here.unit"
+    )
+}
+
 /// A unit on a talkgroup: its row, its calls there in the window, and when it was first heard there (ms).
 pub type TalkgroupUnit = (UnitRow, i64, i64);
 
@@ -338,22 +375,12 @@ pub fn units_on_talkgroup(
     limit: u32,
     offset: u32,
 ) -> rusqlite::Result<(Vec<TalkgroupUnit>, i64)> {
-    const ACTIVE: &str = "WITH tx AS (\
-            SELECT t.unit AS unit, COUNT(DISTINCT c.id) AS n FROM call_transmissions t JOIN calls c ON c.id = t.call_id \
-            WHERE c.system_id = ?1 AND c.tgid = ?2 AND c.start_ms >= ?3 GROUP BY t.unit), \
-         active AS (\
-            SELECT unit, n FROM tx \
-            UNION ALL \
-            SELECT DISTINCT unit, 0 FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND time_ms >= ?3 AND unit NOT IN (SELECT unit FROM tx))";
     let total: i64 = conn.query_row(
-        &format!("{ACTIVE} SELECT COUNT(*) FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit"),
+        &format!("{UNITS_ACTIVE} SELECT COUNT(*) FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit"),
         (system_id, tgid, since_ms),
         |r| r.get(0),
     )?;
-    let cols = UNIT_COLS.split(", ").map(|c| format!("u.{c}")).collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "{ACTIVE} SELECT {cols}, active.n,          COALESCE(MIN(             (SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id),              (SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id)),              (SELECT MIN(time_ms) FROM unit_events WHERE system_id = ?1 AND tgid = ?2 AND unit = u.unit_id),              (SELECT MIN(t.time_ms) FROM call_transmissions t JOIN calls c ON c.id = t.call_id WHERE c.system_id = ?1 AND c.tgid = ?2 AND t.unit = u.unit_id),              u.first_seen_ms) AS first_here          FROM active JOIN units u ON u.system_id = ?1 AND u.unit_id = active.unit ORDER BY active.n DESC, u.unit_id LIMIT ?4 OFFSET ?5"
-    );
+    let sql = units_on_talkgroup_sql();
     let rows = conn
         .prepare(&sql)?
         .query_map((system_id, tgid, since_ms, limit, offset), |r| Ok((unit_row(r)?, r.get::<_, i64>(11)?, r.get::<_, i64>(12)?)))?
@@ -657,6 +684,20 @@ pub(crate) mod tests {
         let sql = format!("SELECT {} FROM talkgroups WHERE system_id = ?2 AND tgid = ?3", stat_sql(Stat::Units30d, 1));
         let plan = s.read(|c| Ok(plan(c, &sql, (0, 1, 101)))).unwrap();
         assert!(plan.contains("unit_events_tg_time"), "{plan}");
+    }
+
+    #[test]
+    fn first_seen_on_a_talkgroup_is_looked_up_by_unit() {
+        let s = Store::in_memory();
+        let plan = s.read(|c| Ok(plan(c, &units_on_talkgroup_sql(), (1, 101, 0, 10, 0)))).unwrap();
+        // Each unit's first event there is a seek on the unit's index, not a walk of the talkgroup's history.
+        assert!(plan.contains("SEARCH e USING COVERING INDEX unit_events_unit_tg_time (system_id=? AND unit=? AND tgid=?)"), "{plan}");
+        assert!(!plan.lines().any(|l| l.ends_with("unit_events_tg_time (system_id=? AND tgid=?)")), "{plan}");
+        // Its first transmission there walks its own transmissions in time order, finding each call by id.
+        assert!(plan.contains("SEARCH t USING INDEX call_transmissions_unit (unit=?)"), "{plan}");
+        assert!(plan.contains("SEARCH c USING INTEGER PRIMARY KEY (rowid=?)"), "{plan}");
+        // The window's units still come from the talkgroup's index.
+        assert!(plan.contains("unit_events_tg_time (system_id=? AND tgid=? AND time_ms>?)"), "{plan}");
     }
 
     #[test]
