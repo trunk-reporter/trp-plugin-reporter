@@ -143,7 +143,7 @@ impl Plugin for Reporter {
 
     fn manifest() -> Manifest {
         Manifest {
-            name: "Reporter".into(),
+            name: "Trunk Reporter".into(),
             subscribe: vec![
                 topic::CALL_START.into(),
                 topic::CALL_END.into(),
@@ -200,7 +200,7 @@ impl Plugin for Reporter {
             let mut state =
                 AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone());
             let log = host.clone();
-            state.cors_origins = config.cors_origins.clone();
+            state.cors_origins = config.allowed_origins();
             state.log = Arc::new(move |m| log.error(m));
             state.audio = Some(audio.clone());
             Some(server::start(state, &config.bind, config.port)?)
@@ -272,8 +272,12 @@ impl Plugin for Reporter {
     }
 
     /// Published to the live-audio clients; no I/O, no waiting. A chunk of a
-    /// system not yet seen is dropped.
+    /// system not yet seen is dropped, and so is every chunk while no client
+    /// listens (before it is decoded).
     fn audio(&mut self, chunk: AudioChunk) {
+        if self.audio.active_streams() == 0 {
+            return;
+        }
         let Some(system_id) = self.ingest.system_id_of(chunk.system, &chunk.short_name) else { return };
         let pcm: Arc<[u8]> = trunk_recorder_plugin::base64::decode(&chunk.pcm).into();
         let sample_rate = u16::try_from(chunk.sample_rate).unwrap_or(u16::MAX);
@@ -311,7 +315,7 @@ mod tests {
     #[test]
     fn the_manifest_subscribes_to_what_the_plugin_needs() {
         let m = trunk_recorder_plugin::describe::<Reporter>();
-        assert_eq!(m.id, "trunk-reporter");
+        assert_eq!((m.id.as_str(), m.name.as_str()), ("trunk-reporter", "Trunk Reporter"));
         assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && m.subscribes("audio"));
         assert!(m.config.is_some() && m.system_config.is_none());
     }

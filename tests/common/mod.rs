@@ -49,7 +49,7 @@ pub fn app_with(token: Option<&str>) -> (Router, Store, Bus, Affiliations) {
     (router(state), store, bus, affiliations)
 }
 
-/// The app with no token that answers cross-origin requests from `origins`.
+/// The app, guarded by `token` when `Some`, that answers cross-origin requests from `origins`.
 pub fn app_with_cors(origins: &[&str], token: Option<&str>) -> Router {
     let (mut state, ..) = state_with(token);
     state.cors_origins = origins.iter().map(|o| o.to_string()).collect();

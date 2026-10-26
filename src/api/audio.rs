@@ -21,6 +21,9 @@ use crate::audio::{AudioBus, AudioFrame, frame_bytes};
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
 /// Clients at once; one more is a 503.
 pub const MAX_CLIENTS: usize = 16;
+/// The longest one message may take to go out. A client whose socket stays full that long (a peer that
+/// stopped reading but never closed) is dropped, so it cannot hold one of the [`MAX_CLIENTS`] places for good.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Which frames a client hears.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,7 +96,8 @@ pub async fn live(State(state): State<AppState>, ws: Result<WebSocketUpgrade, We
 }
 
 /// One client: its control messages, the bus's frames, and the keepalive, until
-/// either side closes. A client too slow for the bus is told what it missed.
+/// either side closes or a message cannot go out within [`SEND_TIMEOUT`]. A client
+/// too slow for the bus is told what it missed.
 async fn client(mut socket: WebSocket, mut rx: Receiver<AudioFrame>, bus: AudioBus, keepalive: Duration, _place: Place) {
     let opened = Instant::now();
     let mut filter = Filter::all();
@@ -124,7 +128,8 @@ async fn client(mut socket: WebSocket, mut rx: Receiver<AudioFrame>, bus: AudioB
             },
             _ = ticker.tick() => Message::Text(json!({"type": "keepalive", "active_streams": bus.active_streams()}).to_string().into()),
         };
-        if socket.send(out).await.is_err() {
+        // Ending the task drops `_place`, giving the client's place back.
+        if !matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(out)).await, Ok(Ok(()))) {
             return;
         }
     }

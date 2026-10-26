@@ -1067,7 +1067,7 @@ paths:
       parameters:
         - name: after
           in: query
-          description: Start of the window. Defaults to ten minutes ago.
+          description: Start of the window. Defaults to ten minutes ago; with only `before` given, ten minutes before it.
           schema:
             type: string
             format: date-time
@@ -1499,7 +1499,7 @@ paths:
         - $ref: "#/components/parameters/unitId"
         - name: after
           in: query
-          description: Start of the window (RFC 3339). Defaults to 24 hours ago.
+          description: Start of the window (RFC 3339). Defaults to 24 hours ago; with only `before` given, 24 hours before it.
           schema:
             type: string
             format: date-time
@@ -2830,7 +2830,7 @@ paths:
             type: string
         - name: after
           in: query
-          description: Start of time range (RFC 3339). Defaults to 24 hours ago.
+          description: Start of time range (RFC 3339). Defaults to 24 hours ago; with only `before` given, 24 hours before it.
           schema:
             type: string
             format: date-time

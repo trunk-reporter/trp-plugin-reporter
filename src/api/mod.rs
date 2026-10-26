@@ -369,12 +369,24 @@ pub fn time_range(q: &Query) -> Result<(Option<i64>, Option<i64>), ApiError> {
     Ok((start, end))
 }
 
-/// The time window `[after, before]` in Unix ms: `after` / `before` (RFC 3339, any offset;
-/// `start_time` / `end_time` are aliases), defaulting to `default_after_ms` and `now_ms`.
-/// An `after` later than `before` is `InvalidTimeRange`.
+/// The first of the time parameters `names` that is given (each one given must parse).
+fn first_time(q: &Query, names: &[&str]) -> Result<Option<i64>, ApiError> {
+    let mut first = None;
+    for name in names {
+        let t = time_param(q, name)?;
+        first = first.or(t);
+    }
+    Ok(first)
+}
+
+/// The half-open time window `[after, before)` in Unix ms: `after` / `before` (RFC 3339, any offset;
+/// `start_time` / `end_time` and `start` / `end` are aliases). `before` defaults to `now_ms`; `after` defaults
+/// to the default window's length before `before` (`default_after_ms` when `before` is now), so `before`
+/// alone moves the whole window back. An `after` later than `before` is `InvalidTimeRange`.
 pub fn window(q: &Query, default_after_ms: i64, now_ms: i64) -> Result<(i64, i64), ApiError> {
-    let after = time_param(q, "after")?.or(time_param(q, "start_time")?).unwrap_or(default_after_ms);
-    let before = time_param(q, "before")?.or(time_param(q, "end_time")?).unwrap_or(now_ms);
+    let after = first_time(q, &["after", "start_time", "start"])?;
+    let before = first_time(q, &["before", "end_time", "end"])?.unwrap_or(now_ms);
+    let after = after.unwrap_or(before.saturating_sub(now_ms.saturating_sub(default_after_ms)));
     if after > before {
         return Err(ApiError::InvalidTimeRange("after is later than before".into()));
     }
@@ -460,6 +472,14 @@ mod tests {
             1_000,
             "after wins over its alias"
         );
+        assert_eq!(w(&[("start", "1970-01-01T00:00:01Z"), ("end", "1970-01-01T00:00:02Z")]).unwrap(), (1_000, 2_000), "the UI design's names");
+        assert_eq!(
+            w(&[("after", "1970-01-01T00:00:01Z"), ("start", "1970-01-01T00:00:00Z"), ("end", "1970-01-01T00:00:02Z")]).unwrap().0,
+            1_000,
+            "after wins over start"
+        );
+        assert_eq!(w(&[("before", "1970-01-01T00:00:01Z")]).unwrap(), (900, 1_000), "before alone moves the default window back");
+        assert_eq!(w(&[("end_time", "1970-01-01T00:00:01Z")]).unwrap(), (900, 1_000));
         assert!(matches!(w(&[("after", "1970-01-01T00:00:03Z")]), Err(ApiError::InvalidTimeRange(_))), "after past the default before");
         assert!(matches!(w(&[("before", "soon")]), Err(ApiError::InvalidParameter(_))));
         assert_eq!(rfc3339(1_705_314_600_000), "2024-01-15T10:30:00.000Z");

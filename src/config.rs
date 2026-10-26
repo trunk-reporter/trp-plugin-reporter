@@ -37,6 +37,14 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// The allowed origins as a browser sends them: each entry without surrounding whitespace or a
+    /// trailing `/` (as one copied from the address bar has), and blank entries dropped.
+    pub fn allowed_origins(&self) -> Vec<String> {
+        self.cors_origins.iter().map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +54,12 @@ mod tests {
     fn defaults_start_without_settings() {
         let c: Config = serde_json::from_value(json!({})).unwrap();
         assert_eq!((c.port, c.bind.as_str(), c.token, c.retention_days, c.backfill), (8092, "127.0.0.1", None, 0, true));
+    }
+
+    #[test]
+    fn allowed_origins_are_trimmed() {
+        let c: Config = serde_json::from_value(json!({"corsOrigins": ["http://a:1/", " http://b:2 ", "", "*"]})).unwrap();
+        assert_eq!(c.allowed_origins(), vec!["http://a:1", "http://b:2", "*"]);
     }
 
     #[test]

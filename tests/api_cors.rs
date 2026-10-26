@@ -60,6 +60,17 @@ async fn star_allows_any_origin_by_echo() {
     assert_eq!(h["access-control-allow-origin"], "http://anywhere.example");
 }
 
+#[tokio::test]
+async fn an_origin_copied_from_the_address_bar_matches() {
+    // Pasted with a trailing slash and a space: the browser sends neither.
+    let config = Config { cors_origins: vec![format!(" {ORIGIN}/ "), "  ".into()], ..Default::default() };
+    let origins = config.allowed_origins();
+    assert_eq!(origins, vec![ORIGIN.to_string()]);
+    let app = app_with_cors(&origins.iter().map(String::as_str).collect::<Vec<_>>(), None);
+    let (_, h, _) = get_with(&app, "/api/v1/health", &[("origin", ORIGIN)]).await;
+    assert_eq!(h["access-control-allow-origin"], ORIGIN);
+}
+
 #[test]
 fn the_setting_is_in_the_schema() {
     let s = trunk_recorder_plugin::schema::schema_for::<Config>();
