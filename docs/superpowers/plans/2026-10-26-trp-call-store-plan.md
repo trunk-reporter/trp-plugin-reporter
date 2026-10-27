@@ -806,6 +806,125 @@ The branch `call-store` is PR 1. Push and open it against `TrunkRecorder/trunk-r
 
 ---
 
+### Task 8b: The batch interval (`store.batchSeconds`) and fresh `history`
+
+Added 2026-10-27 after the maintainer's Pi benchmark (TrunkRecorder/trunk-recorder-pro PR #101,
+`research/storage.md`): committing once a second writes whole pages per commit, about 7 GB a day
+on flash at a call a second; batched over minutes the same rows share pages (1.7 GB at 60 s,
+0.54 GB at 5 min). The maintainer adopted #100 with this one change. Owner's decision: in PR 1.
+
+**Files:**
+- Modify: `crates/trunk-app/src/config.rs` (`StoreSettings.batch_seconds`)
+- Modify: `web/src/protocol.ts` (`StoreSettings.batchSeconds`), `docs/api/protocol.schema.json` (regenerated)
+- Modify: `crates/trunk-pro/src/db/mod.rs` (`Db::open` takes the interval; the pending list)
+- Modify: `crates/trunk-pro/src/db/writer.rs` (the interval replaces the one-second rule; pending cleared after commit)
+- Modify: `crates/trunk-pro/src/runtime.rs` (`history` merges pending entries)
+- Modify: `crates/trunk-pro/src/main.rs` (pass the setting)
+- Modify: `docs/configuration/README.md` (the setting), `docs/api/README.md` (one sentence on lag), `CHANGELOG.md`
+- Test: inline in `db/writer.rs`, `db/mod.rs`, `runtime.rs`, `config.rs`
+
+**Interfaces:**
+- Produces: `StoreSettings { retention_days: u32, batch_seconds: u32 }`, `batch_seconds` default 60, clamped to `1..=3600` when turned into a `Duration`; `Db::open(path, hub, batch: Duration)`; `Db::pending(&self) -> Vec<Value>` (entries of live calls sent and not yet committed, newest first); `runtime::history` = pending merged with the store's newest, deduplicated by `path`, sorted by `record.start_time_ms` desc then `path`, truncated to `HISTORY`.
+- Consumes: Task 1's writer loop, Task 2's `row::entry`, Task 4's `history`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+// config.rs
+#[test]
+fn the_store_batch_defaults_to_60_seconds() {
+    let c = Config::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(c.store.batch_seconds, 60);
+    let c = Config::from_value(serde_json::json!({ "store": { "batchSeconds": 300 } })).unwrap();
+    assert_eq!(c.store.batch_seconds, 300);
+}
+
+// writer.rs: a stream of writes commits once per interval; a lone write after a quiet spell commits at once
+#[test]
+fn a_stream_commits_once_per_interval() {
+    let (db, _) = Db::for_test_with_batch("interval", std::time::Duration::from_secs(2));
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_millis(4500) {
+        db.send(Write::Meta { key: format!("k{}", t.elapsed().as_millis()), value: "v".into() });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    db.flush().unwrap();
+    assert!(db.commits() <= 4, "{} commits in 4.5 s at a 2 s interval", db.commits());
+    let (db2, _) = Db::for_test_with_batch("lone", std::time::Duration::from_secs(60));
+    let t = std::time::Instant::now();
+    db2.send(Write::Meta { key: "a".into(), value: "1".into() });
+    db2.flush().unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(1500), "the first write after a quiet spell commits at once");
+}
+
+// mod.rs: pending entries
+#[test]
+fn a_live_call_is_pending_until_its_commit() {
+    let (db, _) = Db::for_test_with_batch("pending", std::time::Duration::from_secs(60));
+    let r = crate::db::row::tests::record(1, 1000);
+    let json = r.to_json();
+    db.send(Write::Meta { key: "warm".into(), value: "1".into() }); // a commit, so the next write waits for the interval
+    db.flush().unwrap();
+    db.send(Write::Call { row: call_row("s/p", &r, &json, true, true, None, 0), live: true });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let p = db.pending();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0]["path"], "s/p");
+    db.send(Write::CallFiles { path: "s/p".into(), audio: false, json: true });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(db.pending()[0]["audio"], false, "flags settled while pending are reflected");
+    db.flush().unwrap();
+    assert!(db.pending().is_empty(), "cleared by the commit");
+}
+
+// runtime.rs
+#[test]
+fn history_shows_a_call_before_its_batch_commits() {
+    let dir = std::env::temp_dir().join(format!("trunk-pro-hist-pending-{}", std::process::id()));
+    let ctx = test_ctx_with_batch(&dir, std::time::Duration::from_secs(60));
+    let r = crate::db::row::tests::record(9179, 1_700_000_000_000);
+    ctx.db.send(crate::db::Write::Meta { key: "warm".into(), value: "1".into() });
+    ctx.db.flush().unwrap();
+    let entry = index_call(&ctx, "ohmarcs/pending", &r, &r.to_json(), true, true);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let ToClient::History { entries } = history(&ctx) else { panic!() };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], entry);
+    ctx.db.flush().unwrap();
+    let ToClient::History { entries } = history(&ctx) else { panic!() };
+    assert_eq!(entries.len(), 1, "no duplicate once committed");
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p trunk-app the_store_batch && cargo test -p trunk-pro db:: runtime::`
+Expected: compile errors (`for_test_with_batch`, `pending`, `test_ctx_with_batch`).
+
+- [ ] **Step 3: Implement**
+
+- `StoreSettings.batch_seconds: u32`, default 60; the clamp to `1..=3600` happens where it becomes a `Duration` (`main.rs`), with a warning when clamped.
+- `Db::open(path, hub, batch)`; `for_test` keeps 1 s (every existing test's timing assumption); `for_test_with_batch(name, batch)` and `for_test_on` take it.
+- Writer: the "sleep the remainder of one second since the previous commit" rule uses `batch`. A `Flush` still forces the batch to commit at once (tests, shutdown, the backfill's meta). Nothing else changes.
+- Pending: `Inner.pending: Mutex<VecDeque<(String, Value)>>` (path, entry). `Db::send` for `Write::Call { live: true }` pushes `(row.path, row::entry(&row.path, &row.record, row.audio, row.json))` to the front, capped at 5,000 entries (oldest dropped; they are about to be committed anyway). `Write::CallFiles` in `send` patches the flags of a pending entry with that path. The writer, after a successful commit, removes the paths of the live `Call` rows that batch committed. `Db::pending()` returns the entries newest first. A disabled `Db` has an empty pending list.
+- `runtime::history`: `pending` then the store's `newest(HISTORY)`; dedupe by `path` keeping the pending copy; sort by `record.start_time_ms` desc, `path` desc; truncate to `HISTORY`.
+- `main.rs`: `Duration::from_secs(cfg.store.batch_seconds.clamp(1, 3600) as u64)`.
+- Docs: `docs/configuration/README.md` store section: `batchSeconds` (default 60): how often the store commits; each commit writes whole pages, so on SD cards and eMMC 300 is recommended; a crash loses at most one interval of index rows, and the files are still there for the next start's reconcile. `docs/api/README.md` Recorded calls: `history` and `concluded` include calls not yet committed; `olderCalls` and `callsQuery` answer from committed rows, so a call may take up to `batchSeconds` to appear in them. CHANGELOG: the setting in the call store entry.
+
+- [ ] **Step 4: Run everything**
+
+Run: `cd web && npm run schema && cd .. && cargo test -p trunk-app -p trunk-pro`
+Expected: pass (apart from the two known spool tests on this machine).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A crates docs web/src/protocol.ts CHANGELOG.md
+git commit -m "Call store: commits batched for store.batchSeconds (60; 300 for flash), history stays fresh meanwhile"
+```
+
+---
+
 ### Task 9: HTTP routes `/api/v1/` (PR 2)
 
 **Files:**
