@@ -330,11 +330,11 @@ git commit -m "Call store: rows from call records, entries back, flags settled b
 ```rust
 fn seeded(name: &str) -> Db {
     let (db, _) = Db::for_test(name);
-    // 12 calls: talkgroup 1 and 2 alternating, starts 1000..=12000 step 1000, except calls 5 and 6 share start 5000; call 12 has start 0 (clock off); unit 77 talks on calls 3 and 9.
+    // 12 calls: talkgroup 2 (odd i) and 1 (even i), starts i*1000, except call 6 shares call 5's start 5000 and call 12 has start 0 (clock off); unit 77 talks on calls 3 (talkgroup 2) and 8 (talkgroup 1).
     for i in 1..=12u32 {
         let start = match i { 6 => 5000, 12 => 0, _ => i as i64 * 1000 };
         let mut r = super::row::tests::record(1 + i % 2, start);
-        if i == 3 || i == 9 { r.src_list[0].src = 77; }
+        if i == 3 || i == 8 { r.src_list[0].src = 77; }
         db.send(Write::Call { row: call_row(&format!("s/{i}"), &r, &r.to_json(), true, true, None, 0), live: true });
     }
     db.flush();
@@ -368,9 +368,9 @@ fn paging_returns_every_call_exactly_once() {
 #[test]
 fn equal_starts_are_taken_whole() {
     let db = seeded("whole");
-    let p = db.with_reader(|c| older(c, 6001, 1)).unwrap();  // limit 1, but s/5 and s/6 share 5000
+    let p = db.with_reader(|c| older(c, 7001, 1)).unwrap();  // limit 1: 7000 is s/7 alone
     let paths: Vec<&str> = p.entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
-    assert_eq!(paths.len(), 1, "6000 is alone");
+    assert_eq!(paths, ["s/7"], "7000 is alone");
     let p = db.with_reader(|c| older(c, 5001, 1)).unwrap();
     assert_eq!(p.entries.len(), 2, "5000 is shared, both come");
     assert_eq!(p.before, 5000);
