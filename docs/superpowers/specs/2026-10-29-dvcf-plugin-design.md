@@ -126,7 +126,7 @@ Few, all live (`live_settings`), drawn on the plugin's card:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `outputDir` | `""` | Where files go. Empty: beside the call, in TRP's capture folder (the spec's sidecar rule). Otherwise a folder, under which the call's own relative layout is mirrored (`<short_name>/<Y>/<M>/<D>/<base>.dvcf`). |
+| `outputDir` | `""` | Where files go. Empty: under TRP's capture folder at the call's key (`<capture_dir>/<path>.dvcf`, beside the call's other files once it is settled; never in the RAM spool, which TRP's settle would not move it out of). Otherwise a folder, under which the call's own relative layout is mirrored (`<short_name>/<Y>/<M>/<D>/<base>.dvcf`). |
 | `retentionDays` | `0` | Delete `.dvcf` files older than this many days; 0 keeps everything. Only `.dvcf` files the plugin's layout accounts for are touched, nothing else in the capture folder. |
 | `catchUp` | `true` | Convert past calls that still have a frames file and no `.dvcf`: at start, then every 10 minutes. |
 | `catchUpDays` | `30` | How far back the catch-up looks (0: as far as the call store goes). |
@@ -203,7 +203,9 @@ stays 2, since readers are told to ignore unknown JSON keys and nothing else cha
 On `call.concluded`:
 
 1. Skip, with `call.result skipped` and a reason, when: the system is disabled in the plugin's
-   settings; `record.audio_type` is `analog`; `voice_mode` is `provoice`; or no frames file exists
+   settings; `record.audio_type` is `analog`; `voice_mode` is `provoice`; the call has no audio
+   (`call_length_ms` 0: an encrypted or silent call kept by keepEncrypted / keepSilent, which TRP
+   writes no frames for; reason "no audio", no warning); or no frames file exists
    (reason "no frames file: turn on captureFrames in Recording settings"). The missing-file case
    also sets the plugin's status to **warning** with that message, once, until a call with a
    frames file arrives.
@@ -224,7 +226,8 @@ On `call.concluded`:
 ### Catch-up pass
 
 With `catchUp` on: at start, then every 10 minutes, page the call store newest first from
-`now − catchUpDays` (no `from` when 0), 500 a page, `system` unset. For each entry: skip when the
+`now − catchUpDays` (no `from` when 0); with `retentionDays` > 0 the window is the smaller of the two, so
+catch-up never converts what retention would delete, 500 a page, `system` unset. For each entry: skip when the
 system is disabled, the record is analog or ProVoice, the output `.dvcf` already exists, or no
 frames file exists; otherwise queue it as a catch-up job. The pass stops early at the first page
 where nothing was queued and nothing lacked only a `.dvcf` (everything older is settled), and
@@ -253,8 +256,9 @@ this only removes what it doesn't.
   and the next start works them first, before the catch-up pass, dropping with a log line any
   whose frames file is gone. (A `failed` answer keeps the call's files only when the user has
   **Keep when a plugin fails** on; otherwise the frames file would go with the audio and the
-  call could never be converted. Saving loses nothing. No `call.result` is sent for a saved
-  call: the recorder drops its pending entry at its own restart.)
+  call could never be converted. Saving loses nothing. A saved call is answered with its `call.result` when it is worked
+  after the restart: the recorder keeps the pending entry across a plugin-only restart and
+  ignores a result for a call it no longer knows.)
 
 ### Testing
 
