@@ -66,6 +66,7 @@ async fn a_hanging_plugin_is_given_up_within_the_timeout() {
     assert_eq!(status, 200);
     assert!(started.elapsed() < Duration::from_secs(12), "took {:?}", started.elapsed());
     assert!(v.get("transcription_text").is_none(), "{v}");
+    assert_eq!(v["has_transcription"], false, "{v}");
 }
 
 // ---------------------------------------------------------------------------
@@ -174,4 +175,42 @@ fn call_by_path_finds_a_forward_slash_row_and_a_backslash_one() {
             Ok(())
         })
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_call_list_carries_has_transcription_and_the_text() {
+    let (app, seed, fake) = bridged().await;
+    let (status, v) = common::get(&app, "/api/v1/calls").await;
+    assert_eq!(status, 200, "{v}");
+    let calls = v["calls"].as_array().unwrap();
+    let find = |id: trunk_reporter::store::CallId| calls.iter().find(|c| c["call_id"] == id.0).unwrap();
+    for c in calls {
+        common::assert_schema(c, "Call");
+    }
+    let done = find(seed.calls[0]);
+    assert_eq!(done["has_transcription"], true, "{done}");
+    assert_eq!(done["transcription_text"], "234? Medic 10 responding");
+    for i in [1, 2, 3] {
+        let other = find(seed.calls[i]);
+        assert_eq!(other["has_transcription"], false, "call {i}: {other}");
+        assert!(other.get("transcription_text").is_none(), "call {i}: {other}");
+    }
+    let seen = fake.batch_requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].len() >= 2, "{seen:?}");
+}
+
+#[tokio::test]
+async fn one_call_and_talkgroup_and_unit_lists_are_filled_too() {
+    let (app, seed, _fake) = bridged().await;
+    let (id, sys) = (seed.calls[0].0, seed.sys1.0);
+    let (_, v) = common::get(&app, &format!("/api/v1/calls/{id}")).await;
+    assert_eq!(v["has_transcription"], true, "{v}");
+    assert_eq!(v["transcription_text"], "234? Medic 10 responding");
+    for url in [format!("/api/v1/talkgroups/{sys}:101/calls"), format!("/api/v1/units/{sys}-10/calls")] {
+        let (status, v) = common::get(&app, &url).await;
+        assert_eq!(status, 200, "{url}: {v}");
+        let call = v["calls"].as_array().unwrap().iter().find(|c| c["call_id"] == id).unwrap();
+        assert_eq!(call["has_transcription"], true, "{url}: {call}");
+    }
 }

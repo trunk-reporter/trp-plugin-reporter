@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::calls::call_row;
 use super::talkgroups::blocking;
-use super::types::rfc3339;
+use super::types::{Call, rfc3339};
 use super::{ApiError, AppState, Query};
 use crate::store::calls::call_by_id;
 use crate::store::{CallId, StoreError};
@@ -111,4 +111,31 @@ pub async fn transcriptions_batch(State(state): State<AppState>, QueryParams(q):
     let by_path: HashMap<String, &Transcript> = transcripts.iter().filter(|t| is_ok(t)).map(|t| (normalize_path(&t.path), t)).collect();
     let entries: Vec<Value> = calls.iter().filter_map(|(id, path)| by_path.get(&normalize_path(path)).map(|t| to_batch_entry(*id, t))).collect();
     Ok(Json(json!({ "transcriptions": entries })))
+}
+
+/// Say on each call whether the transcribe plugin has an ok transcript of it, with the
+/// text for the snippet. One batch request for the whole list; a bridge that is off, or a
+/// plugin that cannot be reached, leaves the calls as they were.
+pub async fn fill_transcripts(state: &AppState, calls: &mut [Call]) {
+    let Some(client) = state.transcripts.clone() else { return };
+    let mut paths: Vec<String> = calls.iter().filter_map(|c| c.path.as_deref()).map(normalize_path).collect();
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return;
+    }
+    let transcripts = match client.batch(&paths).await {
+        Ok(t) => t,
+        Err(e) => {
+            complain(state, "batch", &e);
+            return;
+        }
+    };
+    let by_path: HashMap<String, &Transcript> = transcripts.iter().filter(|t| is_ok(t)).map(|t| (normalize_path(&t.path), t)).collect();
+    for call in calls {
+        if let Some(t) = call.path.as_deref().and_then(|p| by_path.get(&normalize_path(p))) {
+            call.has_transcription = true;
+            call.transcription_text = t.text.clone();
+        }
+    }
 }

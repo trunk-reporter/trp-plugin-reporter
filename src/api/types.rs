@@ -665,7 +665,8 @@ pub struct CallUnit {
 }
 
 /// The spec's `Call`, with every field the plugin can fill. Transcription
-/// fields other than `has_transcription` are left out (they are optional).
+/// fields other than `has_transcription` and `transcription_text` are left out (they
+/// are optional); those two are filled from the transcribe plugin after the read.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Call {
     /// The recording path, the key that joins a transcript; not part of the API shape.
@@ -719,6 +720,9 @@ pub struct Call {
     pub unit_ids: Vec<u32>,
     pub units: Vec<CallUnit>,
     pub has_transcription: bool,
+    /// The transcript's text, when the transcribe plugin has an ok one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcription_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_json: Option<Value>,
 }
@@ -797,6 +801,7 @@ impl Call {
             unit_ids,
             units,
             has_transcription: false,
+            transcription_text: None,
             metadata_json: row.metadata_json.as_deref().and_then(|t| serde_json::from_str(t).ok()).filter(Value::is_object),
         })
     }

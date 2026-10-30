@@ -13,6 +13,7 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 use super::talkgroups::{blocking, resolve_talkgroup, system_filter, systems};
+use super::transcriptions::fill_transcripts;
 use super::types::{ActiveCallListResponse, Call, CallFrequency, CallFrequencyListResponse, CallListResponse, CallTransmission, CallTransmissionListResponse};
 use super::units::resolve_unit;
 use super::{ApiError, AppState, Query, flag, ids, pagination, sort, time_range};
@@ -54,6 +55,12 @@ fn page(c: &Connection, filter: &CallFilter) -> Result<CallListResponse, ApiErro
     Ok(CallListResponse { calls: calls_of(c, &rows)?, total, limit: filter.limit, offset: filter.offset })
 }
 
+/// A call list with the transcribe plugin's answer filled in.
+async fn filled(state: &AppState, mut body: CallListResponse) -> CallListResponse {
+    fill_transcripts(state, &mut body.calls).await;
+    body
+}
+
 pub async fn list(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<CallListResponse>, ApiError> {
     let mut filter = base_filter(&q)?;
     filter.emergency = flag(&q, "emergency")?;
@@ -66,7 +73,7 @@ pub async fn list(State(state): State<AppState>, QueryParams(q): QueryParams<Que
         page(c, &filter)
     })
     .await?;
-    Ok(Json(body))
+    Ok(Json(filled(&state, body).await))
 }
 
 pub async fn active(State(state): State<AppState>, QueryParams(q): QueryParams<Query>) -> Result<Json<ActiveCallListResponse>, ApiError> {
@@ -89,7 +96,8 @@ pub async fn active(State(state): State<AppState>, QueryParams(q): QueryParams<Q
 }
 
 pub async fn one(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Call>, ApiError> {
-    let body = blocking(&state, move |c| Ok(Call::from_row(c, &call_row(c, &id)?).map_err(StoreError::from)?)).await?;
+    let mut body = blocking(&state, move |c| Ok(Call::from_row(c, &call_row(c, &id)?).map_err(StoreError::from)?)).await?;
+    fill_transcripts(&state, std::slice::from_mut(&mut body)).await;
     Ok(Json(body))
 }
 
@@ -156,7 +164,7 @@ pub async fn talkgroup_calls(
         page(c, &filter)
     })
     .await?;
-    Ok(Json(body))
+    Ok(Json(filled(&state, body).await))
 }
 
 /// `/units/{id}/calls`
@@ -169,5 +177,5 @@ pub async fn unit_calls(State(state): State<AppState>, Path(id): Path<String>, Q
         page(c, &filter)
     })
     .await?;
-    Ok(Json(body))
+    Ok(Json(filled(&state, body).await))
 }
