@@ -79,6 +79,12 @@ fn status_line(serving: Option<&str>, calls: i64, transcripts: Option<bool>) -> 
     }
 }
 
+/// The relay's state when the status line should be set again for it: the bridge
+/// is on and its stream opened or closed since `reported` (`None`: never reported).
+fn relay_change(now: Option<bool>, reported: Option<bool>) -> Option<bool> {
+    now.filter(|c| reported != Some(*c))
+}
+
 /// The database file and its write-ahead log, in bytes.
 fn store_bytes(db: &Path) -> u64 {
     let wal = PathBuf::from(format!("{}-wal", db.display()));
@@ -101,8 +107,10 @@ fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64, calls:
 }
 
 /// Metrics every [`TICK`] (the call count every [`CALLS_EVERY`]); recorder samples thinned hourly and old history
-/// deleted daily (both first a minute after start). Stops when the sender
-/// is used or dropped.
+/// deleted daily (both first a minute after start). The status line is set again
+/// whenever the transcripts relay's stream opens or closes, except while a backfill
+/// (`backfilling`) owns the status. Stops when the sender is used or dropped.
+#[allow(clippy::too_many_arguments)]
 fn maintenance(
     host: Host,
     store: Store,
@@ -111,6 +119,7 @@ fn maintenance(
     dropped: Arc<AtomicU64>,
     retention_days: u32,
     relay: Option<RelayStatus>,
+    backfilling: Arc<AtomicBool>,
 ) -> Result<(mpsc::Sender<()>, JoinHandle<()>), String> {
     let (stop, stopped) = mpsc::channel::<()>();
     let thread = std::thread::Builder::new()
@@ -119,6 +128,8 @@ fn maintenance(
             let first = Instant::now() + FIRST_UPKEEP;
             let (mut next_decimate, mut next_retain) = (first, first);
             let mut calls: Option<(Instant, i64)> = None;
+            // The relay state the status line last showed.
+            let mut reported: Option<bool> = None;
             // A message or a dropped sender ends it.
             while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(TICK) {
                 let count = match calls {
@@ -130,6 +141,12 @@ fn maintenance(
                     }
                 };
                 host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed), count, relay.as_ref()));
+                if !backfilling.load(Ordering::Relaxed)
+                    && let Some(connected) = relay_change(relay.as_ref().map(RelayStatus::connected), reported)
+                {
+                    host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), Some(connected)));
+                    reported = Some(connected);
+                }
                 let now = Instant::now();
                 if now >= next_decimate {
                     store.write(|c| decimate(c, now_ms()).map(|_| ()));
@@ -246,6 +263,8 @@ impl Plugin for Reporter {
         }
 
         let stop_backfill = Arc::new(AtomicBool::new(false));
+        // While set, the backfill owns the status line and maintenance leaves it alone.
+        let backfilling = Arc::new(AtomicBool::new(config.backfill));
         // The status is set before the backfill starts, so its own (the
         // last word once it ends) cannot be overwritten by this one.
         if config.backfill {
@@ -253,7 +272,7 @@ impl Plugin for Reporter {
             let mut walker = new_ingest()?;
             let systems: Vec<_> = store.read(list_systems).map_err(|e| e.to_string())?.into_iter().map(|s| (s.id, s.short_name)).collect();
             let (host, store, capture_dir, serving, stop) = (host.clone(), store.clone(), setup.capture_dir.clone(), serving.clone(), stop_backfill.clone());
-            let relay_status = relay_status.clone();
+            let (relay_status, backfilling) = (relay_status.clone(), backfilling.clone());
             std::thread::Builder::new()
                 .name("backfill".into())
                 .spawn(move || {
@@ -281,13 +300,14 @@ impl Plugin for Reporter {
                         ));
                     }
                     host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
+                    backfilling.store(false, Ordering::Relaxed);
                 })
                 .map_err(|e| format!("cannot start the backfill: {e}"))?;
         } else {
             host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
         }
 
-        let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days, relay_status)?;
+        let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days, relay_status, backfilling)?;
         Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill, audio, relay })
     }
 
@@ -491,6 +511,19 @@ mod tests {
         assert_eq!(status_line(Some("http://127.0.0.1:8092/"), 3, None), "http://127.0.0.1:8092/ · 3 calls stored");
         assert_eq!(status_line(Some("http://127.0.0.1:8092/"), 3, Some(true)), "http://127.0.0.1:8092/ · 3 calls stored · transcripts: live");
         assert_eq!(status_line(None, 0, Some(false)), "not serving (Port is 0) · 0 calls stored · transcripts: unreachable");
+    }
+
+    #[test]
+    fn the_status_line_follows_the_relay_once_per_change() {
+        // Bridge off: never.
+        assert_eq!(relay_change(None, None), None);
+        // The first tick reports, whatever the state.
+        assert_eq!(relay_change(Some(false), None), Some(false));
+        // Unchanged: nothing; changed: the new state.
+        assert_eq!(relay_change(Some(false), Some(false)), None);
+        assert_eq!(relay_change(Some(true), Some(false)), Some(true));
+        assert_eq!(relay_change(Some(true), Some(true)), None);
+        assert_eq!(relay_change(Some(false), Some(true)), Some(false));
     }
 
     #[test]
