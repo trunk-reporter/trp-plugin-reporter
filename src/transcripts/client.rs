@@ -1,6 +1,7 @@
 //! The client for the transcribe plugin's local HTTP API. Every request is bounded
 //! (3 s to connect, 10 s in all) so a plugin that is down or stuck cannot slow a page;
-//! the event stream has a connect timeout only, since it is meant to stay open.
+//! the event stream has a connect timeout only, since it is meant to stay open (the
+//! relay bounds the wait for its answer).
 
 use std::time::Duration;
 
@@ -85,7 +86,8 @@ impl TranscribeClient {
     }
 
     /// Opens the plugin's event stream, asking for what was written since
-    /// `last_event_id` when given. The caller reads the body.
+    /// `last_event_id` when given. The caller reads the body, and bounds the wait for the
+    /// answer: only connecting is timed out here.
     pub async fn events(&self, last_event_id: Option<i64>) -> Result<reqwest::Response, String> {
         let mut req = self.stream.get(format!("{}/api/v1/events", self.base)).header("Accept", "text/event-stream");
         if let Some(id) = last_event_id {

@@ -2,9 +2,11 @@
 //! published on the bus as a `transcription` event for its call.
 //!
 //! It reconnects after any error or end of the stream (1 s, doubling to 30 s, back to
-//! 1 s once a frame arrives) and asks for what it missed with `Last-Event-ID`. A
+//! 1 s once a transcript frame arrives; pings do not count) and asks for what it missed
+//! with `Last-Event-ID`. Opening the stream is given up after 45 s without an answer. A
 //! transcript whose call is not stored yet is looked up again after 2 s and 10 s,
-//! without holding up the frames behind it, then dropped.
+//! without holding up the frames behind it, then dropped. Why a stream ended, a frame
+//! that cannot be read and a failed store lookup are logged, each at most once a minute.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -25,14 +27,18 @@ use crate::store::calls::{CallRow, call_by_path};
 
 /// A stream with no frame (pings included) for this long is dead.
 const IDLE: Duration = Duration::from_secs(45);
+/// How long opening the event stream may wait for the plugin's answer (its response
+/// headers) before the plugin counts as not reachable.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// The waits before the second and third lookups of a call not yet stored.
 const RETRIES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(10)];
 /// How many published `(path, transcribedMs)` pairs are remembered, so a replay is not published twice.
 const SEEN: usize = 256;
-/// The "no such call" line is logged at most this often.
-const DROPPED_LOG_EVERY: Duration = Duration::from_secs(60);
+/// Each kind of throttled line ("no such call", stream ended, undecodable frame, lookup
+/// failed) is logged at most this often.
+const LOG_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct RelayInner {
@@ -55,7 +61,7 @@ impl RelayStatus {
         self.lock().connected
     }
 
-    /// The `transcribedMs` of the last transcript published.
+    /// The `transcribedMs` of the latest transcript published (ms since the epoch).
     pub fn last_event_ms(&self) -> Option<i64> {
         self.lock().last_event_ms
     }
@@ -119,9 +125,21 @@ impl Relay {
         }
     }
 
-    async fn lookup(&self, path: &str) -> Option<CallRow> {
+    /// Logs `line` unless a line of the same `key` was logged within the last minute.
+    fn say(&self, key: &'static str, line: impl FnOnce() -> String) {
+        if self.throttle.allow(key) {
+            (self.log)(line());
+        }
+    }
+
+    /// The stored call at `path`; an error when the store could not be read (which is not "no such call").
+    async fn lookup(&self, path: &str) -> Result<Option<CallRow>, String> {
         let (store, path) = (self.store.clone(), path.to_string());
-        tokio::task::spawn_blocking(move || store.read(|c| call_by_path(c, &path))).await.ok()?.ok()?
+        match tokio::task::spawn_blocking(move || store.read(|c| call_by_path(c, &path))).await {
+            Ok(Ok(row)) => Ok(row),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// A transcript from the stream: published when it counts, is new and its call is stored.
@@ -131,23 +149,31 @@ impl Relay {
             return;
         }
         match self.lookup(&t.path).await {
-            Some(row) => self.publish(t, &row),
-            None => self.pending.push(Pending { transcript: t, due: Instant::now() + RETRIES[0], next: 1 }),
+            Ok(Some(row)) => self.publish(t, &row),
+            Ok(None) => self.pending.push(Pending { transcript: t, due: Instant::now() + RETRIES[0], next: 1 }),
+            Err(e) => {
+                self.say("lookup", || format!("transcribe plugin: store lookup failed: {e}"));
+                self.pending.push(Pending { transcript: t, due: Instant::now() + RETRIES[0], next: 1 });
+            }
         }
     }
 
-    /// Looks up every transcript now due again; one still without its call waits for the next retry or is dropped.
+    /// Looks up every transcript now due again; one still without its call (or whose lookup
+    /// failed) waits for the next retry, or after the last one is dropped.
     async fn retry_due(&mut self) {
         let now = Instant::now();
         let (due, waiting): (Vec<Pending>, Vec<Pending>) = std::mem::take(&mut self.pending).into_iter().partition(|p| p.due <= now);
         self.pending = waiting;
         for p in due {
+            let again = p.next < RETRIES.len();
             match self.lookup(&p.transcript.path).await {
-                Some(row) => self.publish(p.transcript, &row),
-                None if p.next < RETRIES.len() => self.pending.push(Pending { due: Instant::now() + RETRIES[p.next], next: p.next + 1, ..p }),
-                None => {
-                    if self.throttle.allow("dropped") {
-                        (self.log)(format!("transcript for {}: no such call, dropped", p.transcript.path));
+                Ok(Some(row)) => self.publish(p.transcript, &row),
+                Ok(None) if again => self.pending.push(Pending { due: Instant::now() + RETRIES[p.next], next: p.next + 1, ..p }),
+                Ok(None) => self.say("dropped", || format!("transcript for {}: no such call, dropped", p.transcript.path)),
+                Err(e) => {
+                    self.say("lookup", || format!("transcribe plugin: store lookup failed: {e}"));
+                    if again {
+                        self.pending.push(Pending { due: Instant::now() + RETRIES[p.next], next: p.next + 1, ..p });
                     }
                 }
             }
@@ -174,7 +200,8 @@ impl Relay {
         });
         let mut s = self.status.lock();
         s.relayed += 1;
-        s.last_event_ms = Some(t.transcribed_ms);
+        // A late retry must not move it backwards.
+        s.last_event_ms = Some(s.last_event_ms.map_or(t.transcribed_ms, |ms| ms.max(t.transcribed_ms)));
         drop(s);
         self.seen.push_back(Relay::key(&t));
         while self.seen.len() > SEEN {
@@ -185,16 +212,34 @@ impl Relay {
 
 /// Relays the plugin's event stream onto `bus` until `stop` becomes `true` (or its
 /// sender is dropped). The first connection asks for no replay; each reconnect sends
-/// the last `transcribedMs` seen as `Last-Event-ID`. Logs through `log` only when the
-/// connection's state changes, and a dropped transcript at most once a minute.
-pub async fn run_relay(client: Arc<TranscribeClient>, store: Store, bus: Bus, status: RelayStatus, log: Log, mut stop: watch::Receiver<bool>) {
-    let mut relay = Relay { store, bus, status, log, seen: VecDeque::new(), pending: Vec::new(), throttle: Throttle::new(DROPPED_LOG_EVERY) };
+/// the last `transcribedMs` seen as `Last-Event-ID`. Logs through `log` when the
+/// connection's state changes, and why a stream ended, a dropped transcript, an
+/// undecodable frame or a failed lookup at most once a minute each.
+pub async fn run_relay(client: Arc<TranscribeClient>, store: Store, bus: Bus, status: RelayStatus, log: Log, stop: watch::Receiver<bool>) {
+    run_relay_within(OPEN_TIMEOUT, client, store, bus, status, log, stop).await
+}
+
+/// As [`run_relay`], giving up on opening the stream after `open_timeout` instead of
+/// [`OPEN_TIMEOUT`] (for tests).
+pub async fn run_relay_within(
+    open_timeout: Duration,
+    client: Arc<TranscribeClient>,
+    store: Store,
+    bus: Bus,
+    status: RelayStatus,
+    log: Log,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut relay = Relay { store, bus, status, log, seen: VecDeque::new(), pending: Vec::new(), throttle: Throttle::new(LOG_EVERY) };
     let mut last_id: Option<i64> = None;
     let mut backoff = FIRST_BACKOFF;
     // Whether "not reachable" was logged since the last connection.
     let mut failing = false;
     loop {
-        let Ok(opened) = relay.wait(client.events(last_id), &mut stop).await else { return };
+        // A plugin that takes the connection but never answers is as good as down.
+        let open =
+            async { tokio::time::timeout(open_timeout, client.events(last_id)).await.unwrap_or_else(|_| Err(format!("no answer within {open_timeout:?}"))) };
+        let Ok(opened) = relay.wait(open, &mut stop).await else { return };
         match opened {
             Ok(resp) => {
                 relay.status.set_connected(true);
@@ -204,23 +249,35 @@ pub async fn run_relay(client: Arc<TranscribeClient>, store: Store, bus: Bus, st
                 let mut parser = SseParser::default();
                 // An error, the end of the body or 45 s of silence ends the connection; the
                 // reconnect then says "connected" again or "not reachable".
-                loop {
+                let reason = loop {
                     let Ok(next) = relay.wait(tokio::time::timeout(IDLE, body.next()), &mut stop).await else {
                         relay.status.set_connected(false);
                         return;
                     };
-                    let Ok(Some(Ok(chunk))) = next else { break };
+                    let chunk = match next {
+                        Ok(Some(Ok(chunk))) => chunk,
+                        Ok(Some(Err(e))) => break e.to_string(),
+                        Ok(None) => break "the plugin closed it".to_string(),
+                        Err(_) => break format!("no frame for {IDLE:?}"),
+                    };
                     for frame in parser.feed(&chunk) {
-                        backoff = FIRST_BACKOFF;
                         if frame.event.as_deref() != Some("transcript") {
                             continue;
                         }
-                        let Ok(t) = serde_json::from_str::<Transcript>(&frame.data) else { continue };
-                        last_id = Some(last_id.map_or(t.transcribed_ms, |id| id.max(t.transcribed_ms)));
-                        relay.transcript(t).await;
+                        // Only a transcript resets the backoff: a stream that pings and
+                        // closes must not be reopened every second.
+                        backoff = FIRST_BACKOFF;
+                        match serde_json::from_str::<Transcript>(&frame.data) {
+                            Ok(t) => {
+                                last_id = Some(last_id.map_or(t.transcribed_ms, |id| id.max(t.transcribed_ms)));
+                                relay.transcript(t).await;
+                            }
+                            Err(e) => relay.say("undecodable", || format!("transcribe plugin: undecodable transcript frame: {e}")),
+                        }
                     }
-                }
+                };
                 relay.status.set_connected(false);
+                relay.say("ended", || format!("transcribe plugin: event stream ended: {reason}"));
             }
             Err(e) => {
                 if !failing {

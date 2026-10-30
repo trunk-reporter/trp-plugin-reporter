@@ -15,7 +15,7 @@ use trunk_reporter::bus::{Bus, Event, EventKind, Filter, Subscription};
 use trunk_reporter::store::calls::{NewCall, call_started};
 use trunk_reporter::store::{CallId, Store};
 use trunk_reporter::transcripts::client::TranscribeClient;
-use trunk_reporter::transcripts::relay::{RelayStatus, run_relay};
+use trunk_reporter::transcripts::relay::{RelayStatus, run_relay, run_relay_within};
 
 /// A relay running against a fake plugin, on a seeded store.
 struct Rig {
@@ -58,6 +58,15 @@ impl Rig {
 
     async fn next(&mut self, within: Duration) -> Option<Event> {
         timeout(within, self.sub.rx.recv()).await.ok().flatten()
+    }
+
+    /// Waits up to 5 s for a log line equal to `line`.
+    async fn logged(&self, line: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.logs.lock().unwrap().iter().any(|m| m == line) {
+            assert!(Instant::now() < deadline, "no line {line:?} in {:?}", self.logs.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Stop the relay and see that it ends.
@@ -167,10 +176,8 @@ async fn a_frame_for_a_call_not_yet_stored_is_retried_then_published() {
     assert_eq!(data(&e)["call_id"], id.0);
     assert_eq!(data(&e)["text"], "late");
 
-    let started = Instant::now();
     rig.send(transcript("ohmarcs/101-1_1", "ok", Some("never"), 21));
-    assert!(rig.next(Duration::from_secs(13)).await.is_none(), "a call never stored makes no event");
-    assert!(started.elapsed() >= Duration::from_secs(12));
+    assert!(rig.next(Duration::from_secs(15)).await.is_none(), "a call never stored makes no event");
     assert!(rig.logs.lock().unwrap().iter().any(|m| m == "transcript for ohmarcs/101-1_1: no such call, dropped"), "{:?}", rig.logs.lock().unwrap());
     assert_eq!(rig.status.relayed(), 1);
     rig.finish().await;
@@ -196,6 +203,85 @@ async fn a_closed_stream_reconnects_with_last_event_id_and_publishes_a_replay_on
     assert!(rig.next(Duration::from_millis(500)).await.is_none(), "the replay is published once");
     assert_eq!(rig.status.relayed(), 2);
     rig.finish().await;
+}
+
+#[tokio::test]
+async fn an_undecodable_frame_makes_no_event_and_is_logged() {
+    let mut rig = Rig::start().await;
+    let path = rig.c1_path();
+    rig.send(json!({ "path": 7, "transcribedMs": 5 }));
+    rig.send(transcript(&path, "ok", Some("after"), 6));
+    assert_eq!(data(&rig.next(Duration::from_secs(2)).await.expect("the good frame's event"))["text"], "after");
+    assert!(rig.next(Duration::from_millis(300)).await.is_none(), "the undecodable frame makes no event");
+    assert_eq!(rig.status.relayed(), 1);
+    let logs = rig.logs.lock().unwrap().clone();
+    assert!(logs.iter().any(|m| m.starts_with("transcribe plugin: undecodable transcript frame: ")), "{logs:?}");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_closed_stream_logs_why_it_ended() {
+    let rig = Rig::start().await;
+    rig.logged("transcribe plugin event stream connected").await;
+    rig.fake.events.send(FakeEvent::Close).unwrap();
+    rig.logged("transcribe plugin: event stream ended: the plugin closed it").await;
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_stream_that_only_pings_and_closes_backs_off() {
+    let rig = Rig::start().await;
+    // Each connection gets pings (every 100 ms) for 250 ms, then is closed.
+    let watch_for = Duration::from_secs(6);
+    let started = Instant::now();
+    let mut closed = 0;
+    while started.elapsed() < watch_for {
+        let connections = rig.fake.last_event_ids.lock().unwrap().len();
+        if connections > closed {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            rig.fake.events.send(FakeEvent::Close).unwrap();
+            closed = connections;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Backoffs of 1 s, 2 s, 4 s: connections at about 0, 1.25 and 3.5 s. Were pings to
+    // reset the backoff, one every 1.25 s would make five.
+    let connections = rig.fake.last_event_ids.lock().unwrap().len();
+    assert!((2..=4).contains(&connections), "{connections} connections in {watch_for:?}");
+    rig.finish().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_never_answers_is_given_up_and_retried() {
+    // Takes connections and holds them, never answering.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let accepted: Arc<Mutex<Vec<tokio::net::TcpStream>>> = Arc::default();
+    let held = accepted.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            held.lock().unwrap().push(socket);
+        }
+    });
+    let client = Arc::new(TranscribeClient::new(&url).unwrap());
+    let status = RelayStatus::default();
+    let logs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = logs.clone();
+    let log: Log = Arc::new(move |m| sink.lock().unwrap().push(m));
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(run_relay_within(Duration::from_millis(300), client, Store::in_memory(), Bus::new(10), status.clone(), log, stopped));
+    let want = format!("transcribe plugin not reachable at {url}: no answer within 300ms");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The line, then a second attempt after the 1 s backoff: the relay keeps running.
+    while !(logs.lock().unwrap().contains(&want) && accepted.lock().unwrap().len() >= 2) {
+        assert!(Instant::now() < deadline, "logs {:?}, {} connections", logs.lock().unwrap(), accepted.lock().unwrap().len());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!status.connected());
+    assert!(!task.is_finished());
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(2), task).await.expect("a stop ends the relay").unwrap();
+    server.abort();
 }
 
 #[tokio::test]

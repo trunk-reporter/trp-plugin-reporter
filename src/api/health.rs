@@ -30,7 +30,7 @@ pub struct TranscribeHealth {
     pub url: String,
     /// Whether the plugin's event stream is open.
     pub connected: bool,
-    /// When the last event arrived from it (ms since the epoch).
+    /// The `transcribedMs` of the last transcript relayed (ms since the epoch).
     pub last_event_ms: Option<i64>,
 }
 
