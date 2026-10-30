@@ -1,5 +1,6 @@
 //! Transcripts from the transcribe plugin: the shape it serves, the rule for which
-//! ones count, the path that joins them to our calls, and a client for its API.
+//! ones count, the path that joins them to our calls, a client for its API, and the
+//! relay of its event stream onto the bus.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod relay;
 pub mod sse;
 
 pub use sse::{Frame, SseParser};

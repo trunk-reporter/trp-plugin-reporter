@@ -144,3 +144,32 @@ async fn an_idle_stream_sends_keepalive_comments() {
     let mut pending = Pending::new(body);
     assert_eq!(frame(&mut s, &mut pending).await, ": keepalive\n\n");
 }
+
+#[tokio::test]
+async fn transcription_events_reach_the_stream_and_its_type_filter() {
+    let (router, _s, bus, _a) = common::app();
+    let addr = serve(router).await;
+    let (mut s, _head, body) = open(addr, "/api/v1/events/stream?types=transcription", "").await;
+    let mut pending = Pending::new(body);
+    let (mut other, _head, other_body) = open(addr, "/api/v1/events/stream?types=call_start", "").await;
+    let mut other_pending = Pending::new(other_body);
+    while bus.subscriber_count() < 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let data = r#"{"call_id":2414,"system_id":1,"tgid":48549,"text":"234?","start_time":"2026-10-30T12:00:00Z"}"#;
+    let id = bus
+        .publish(NewEvent {
+            kind: EventKind::Transcription,
+            sub_type: None,
+            system_id: Some(1),
+            site_id: None,
+            tgid: Some(48549),
+            unit_id: None,
+            emergency: false,
+            data: data.into(),
+        })
+        .id;
+    assert_eq!(frame(&mut s, &mut pending).await, format!("id: {id}\nevent: transcription\ndata: {data}\n\n"));
+    let more = timeout(Duration::from_millis(200), frame(&mut other, &mut other_pending)).await;
+    assert!(more.is_err(), "a call_start stream got a transcription: {more:?}");
+}

@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::affiliations::Affiliations;
 use crate::api::{AppState, Features, HostStatus, router};
@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::store::systems::meta_get;
 use crate::store::units::affiliation_events_since;
 use crate::store::{Store, now_ms};
+use crate::transcripts::relay::spawn_relay;
 
 /// Events the SSE stream can replay to a client that reconnects.
 pub const BUS_RING: usize = 1_000;
@@ -32,6 +33,8 @@ pub struct ServerHandle {
     stop: oneshot::Sender<()>,
     done: mpsc::Receiver<()>,
     thread: JoinHandle<()>,
+    /// `serve` mode's transcripts relay, stopped with the server.
+    relay: Option<(watch::Sender<bool>, JoinHandle<()>)>,
 }
 
 impl ServerHandle {
@@ -48,6 +51,10 @@ impl ServerHandle {
     /// As [`ServerHandle::stop`], waiting at most `wait`. A connection still
     /// open then (an event stream) is left to the process's exit.
     pub fn stop_within(self, wait: Duration) {
+        if let Some((stop, _thread)) = &self.relay {
+            // It ends at its next await; the thread is not waited for.
+            let _ = stop.send(true);
+        }
         let _ = self.stop.send(());
         if self.done.recv_timeout(wait).is_ok() {
             let _ = self.thread.join();
@@ -92,7 +99,7 @@ pub fn start(state: AppState, bind: &str, port: u16) -> Result<ServerHandle, Str
             let _ = done_tx.send(());
         })
         .map_err(|e| format!("cannot start the server: {e}"))?;
-    Ok(ServerHandle { addr, stop, done, thread })
+    Ok(ServerHandle { addr, stop, done, thread, relay: None })
 }
 
 /// `serve <data dir>`: the history a plugin run left in `data_dir`, served with
@@ -120,12 +127,23 @@ pub fn serve_data_dir(data_dir: &Path) -> Result<ServerHandle, String> {
     };
     let affiliations = Affiliations::new();
     affiliations.rebuild(&store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?);
-    let mut state = AppState::new(store, Bus::new(BUS_RING), affiliations, capture_dir.into(), config.token.clone(), HostStatus::new(&host_name, false))
+    let bus = Bus::new(BUS_RING);
+    let mut state = AppState::new(store.clone(), bus.clone(), affiliations, capture_dir.into(), config.token.clone(), HostStatus::new(&host_name, false))
         .with_transcribe(&config.transcribe_url)?;
     state.features = Features::SERVE;
     state.cors_origins = config.allowed_origins();
     state.log = Arc::new(|m| eprintln!("{m}"));
-    start(state, &config.bind, config.port)
+    // A failed start drops the relay's sender, which stops it.
+    let mut relay = None;
+    if let Some(client) = state.transcripts.clone() {
+        eprintln!("reading transcripts from {}", client.base());
+        let (status, stop, thread) = spawn_relay(client, store.clone(), bus.clone(), Arc::new(|m| eprintln!("{m}")));
+        state.relay = Some(status);
+        relay = Some((stop, thread));
+    }
+    let mut server = start(state, &config.bind, config.port)?;
+    server.relay = relay;
+    Ok(server)
 }
 
 #[cfg(test)]

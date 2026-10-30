@@ -72,7 +72,7 @@ fn wait_exit(child: &mut Child, within: Duration) -> Option<i32> {
 fn the_plugin_serves_while_running_and_stops_cleanly() {
     let dir = testing::temp_dir("reporter-serve-plugin");
     let port = free_port();
-    let hello = serde_json::to_string(&HostMessage::Hello(testing::hello(&dir, json!({"port": port})))).unwrap();
+    let hello = serde_json::to_string(&HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": port})))).unwrap();
     let mut child = Command::new(BIN).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "{hello}").unwrap();
@@ -106,12 +106,12 @@ fn serve(data_dir: &Path) -> Child {
 fn serve_mode_opens_an_existing_store() {
     let dir = testing::temp_dir("reporter-serve-store");
     let out = testing::run::<Reporter>([
-        HostMessage::Hello(testing::hello(&dir, json!({"port": 0, "backfill": false}))),
+        HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false}))),
         HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)),
     ]);
     assert!(out.ready());
     let port = free_port();
-    std::fs::write(dir.join("data/serve.json"), json!({"port": port}).to_string()).unwrap();
+    std::fs::write(dir.join("data/serve.json"), json!({"transcribeUrl": "", "port": port}).to_string()).unwrap();
     let mut child = serve(&dir.join("data"));
     let h = health(port);
     assert_eq!(h["trunk_recorders"][0]["status"], "disconnected");
@@ -140,7 +140,7 @@ fn serve_mode_without_a_store_says_what_to_do() {
 #[test]
 fn serve_mode_reports_a_bad_settings_file() {
     let dir = testing::temp_dir("reporter-serve-badjson");
-    testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"port": 0, "backfill": false})))]);
+    testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false})))]);
     std::fs::write(dir.join("data/serve.json"), "{not json").unwrap();
     let mut child = serve(&dir.join("data"));
     assert_eq!(wait_exit(&mut child, Duration::from_secs(5)), Some(2));

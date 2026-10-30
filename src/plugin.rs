@@ -1,5 +1,5 @@
-//! The plugin: its manifest, start-up (store, server, backfill, maintenance),
-//! event handling and shutdown.
+//! The plugin: its manifest, start-up (store, server, backfill, maintenance, the
+//! transcripts relay), event handling and shutdown.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use tokio::sync::watch;
 use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic};
 
 use crate::affiliations::Affiliations;
@@ -24,6 +25,8 @@ use crate::store::recorder::{decimate, retain};
 use crate::store::systems::{list_systems, meta_set};
 use crate::store::units::affiliation_events_since;
 use crate::store::{Store, now_ms};
+use crate::transcripts::client::TranscribeClient;
+use crate::transcripts::relay::{RelayStatus, spawn_relay};
 
 /// How often the recorder gets metrics.
 const TICK: Duration = Duration::from_secs(5);
@@ -47,6 +50,8 @@ pub struct Reporter {
     stop_backfill: Arc<AtomicBool>,
     /// The recorder's live audio, for `/audio/live`'s clients.
     audio: AudioBus,
+    /// The relay of the transcribe plugin's event stream, when the bridge is on.
+    relay: Option<(watch::Sender<bool>, JoinHandle<()>)>,
 }
 
 #[cfg(test)]
@@ -60,11 +65,17 @@ fn calls_stored(store: &Store) -> i64 {
     store.read(|c| c.query_row("SELECT count(*) FROM calls", [], |r| r.get(0))).unwrap_or(0)
 }
 
-/// The status line once the plugin is up (and after a backfill).
-fn status_line(serving: Option<&str>, calls: i64) -> String {
-    match serving {
+/// The status line once the plugin is up (and after a backfill); `transcripts` is
+/// whether the relay's stream is open, when the bridge is on.
+fn status_line(serving: Option<&str>, calls: i64, transcripts: Option<bool>) -> String {
+    let line = match serving {
         Some(url) => format!("{url} · {calls} calls stored"),
         None => format!("not serving (Port is 0) · {calls} calls stored"),
+    };
+    match transcripts {
+        Some(true) => format!("{line} · transcripts: live"),
+        Some(false) => format!("{line} · transcripts: unreachable"),
+        None => line,
     }
 }
 
@@ -74,14 +85,18 @@ fn store_bytes(db: &Path) -> u64 {
     [db, wal.as_path()].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
 }
 
-/// What the recorder shows on the plugin's card; `calls` is the stored call count.
-fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64, calls: i64) -> Metrics {
+/// What the recorder shows on the plugin's card; `calls` is the stored call count,
+/// `relay` the transcripts relay when the bridge is on.
+fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64, calls: i64, relay: Option<&RelayStatus>) -> Metrics {
     let mb = (store_bytes(db) as f64 / 1e5).round() / 10.0;
     let mut m = Metrics { queued: Some(store.queue_len() as u64), ..Default::default() };
     m.extra.insert("calls".into(), json!(calls));
     m.extra.insert("store_mb".into(), json!(mb));
     m.extra.insert("serving".into(), json!(serving.unwrap_or("not serving")));
     m.extra.insert("dropped_events".into(), json!(dropped));
+    if let Some(r) = relay {
+        m.extra.insert("transcripts_relayed".into(), json!(r.relayed()));
+    }
     m
 }
 
@@ -95,6 +110,7 @@ fn maintenance(
     serving: Option<String>,
     dropped: Arc<AtomicU64>,
     retention_days: u32,
+    relay: Option<RelayStatus>,
 ) -> Result<(mpsc::Sender<()>, JoinHandle<()>), String> {
     let (stop, stopped) = mpsc::channel::<()>();
     let thread = std::thread::Builder::new()
@@ -113,7 +129,7 @@ fn maintenance(
                         n
                     }
                 };
-                host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed), count));
+                host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed), count, relay.as_ref()));
                 let now = Instant::now();
                 if now >= next_decimate {
                     store.write(|c| decimate(c, now_ms()).map(|_| ()));
@@ -192,17 +208,32 @@ impl Plugin for Reporter {
         #[cfg(test)]
         AUDIO_TAP.with(|t| *t.borrow_mut() = Some(audio.subscribe()));
         let config = &setup.config;
+        // The relay runs whether or not the API is served. Its sender, dropped by an
+        // early return below, stops it.
+        let transcribe = match config.transcribe_url.trim() {
+            "" => None,
+            url => Some(Arc::new(TranscribeClient::new(url)?)),
+        };
+        let (relay_status, relay) = match &transcribe {
+            Some(client) => {
+                host.info(format!("reading transcripts from {}", client.base()));
+                let h = host.clone();
+                let (status, stop, thread) = spawn_relay(client.clone(), store.clone(), bus.clone(), Arc::new(move |m| h.info(m)));
+                (Some(status), Some((stop, thread)))
+            }
+            None => (None, None),
+        };
         let host_status = HostStatus::new(&setup.host.name, true);
         host_status.touch(now_ms());
         let server = if config.port == 0 {
             None
         } else {
             let mut state =
-                AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone())
-                    .with_transcribe(&config.transcribe_url)?;
-            if let Some(t) = &state.transcripts {
-                host.info(format!("reading transcripts from {}", t.base()));
+                AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone());
+            if let Some(client) = &transcribe {
+                state = state.with_transcribe_client(client.clone());
             }
+            state.relay = relay_status.clone();
             let log = host.clone();
             state.cors_origins = config.allowed_origins();
             state.log = Arc::new(move |m| log.error(m));
@@ -222,6 +253,7 @@ impl Plugin for Reporter {
             let mut walker = new_ingest()?;
             let systems: Vec<_> = store.read(list_systems).map_err(|e| e.to_string())?.into_iter().map(|s| (s.id, s.short_name)).collect();
             let (host, store, capture_dir, serving, stop) = (host.clone(), store.clone(), setup.capture_dir.clone(), serving.clone(), stop_backfill.clone());
+            let relay_status = relay_status.clone();
             std::thread::Builder::new()
                 .name("backfill".into())
                 .spawn(move || {
@@ -248,15 +280,15 @@ impl Plugin for Reporter {
                             report.ingested, report.files, report.skipped_known, report.skipped_new, report.bad
                         ));
                     }
-                    host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store)));
+                    host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
                 })
                 .map_err(|e| format!("cannot start the backfill: {e}"))?;
         } else {
-            host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store)));
+            host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
         }
 
-        let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days)?;
-        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill, audio })
+        let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days, relay_status)?;
+        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill, audio, relay })
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -293,7 +325,8 @@ impl Plugin for Reporter {
         self.ingest.handle(HostMessage::Status(status));
     }
 
-    /// A running backfill is told to stop, then maintenance, then the server (at most 2 s of `grace`), then every
+    /// A running backfill is told to stop, then maintenance, then the transcripts relay (waited
+    /// for within `grace`), then the server (at most 2 s of `grace`), then every
     /// queued write. The flush runs even when the grace is spent: the
     /// history matters more than the deadline.
     fn shutdown(&mut self, grace: Duration) {
@@ -302,6 +335,16 @@ impl Plugin for Reporter {
         if let Some((stop, thread)) = self.maintenance.take() {
             let _ = stop.send(());
             let _ = thread.join();
+        }
+        if let Some((stop, thread)) = self.relay.take() {
+            // It ends at its next await; a thread still running at the deadline is left to the exit.
+            let _ = stop.send(true);
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
         if let Some(server) = self.server.take() {
             server.stop_within(deadline.saturating_duration_since(Instant::now()).min(SERVER_STOP));
@@ -328,7 +371,7 @@ mod tests {
     fn the_plugin_starts_stores_and_answers() {
         let dir = testing::temp_dir("reporter");
         let out = testing::run::<Reporter>([
-            HostMessage::Hello(testing::hello(&dir, json!({"port": 0}))),
+            HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0}))),
             HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)),
         ]);
         assert!(out.ready());
@@ -345,7 +388,7 @@ mod tests {
         let call =
             CallInfo { id: 7, system: 0, short_name: "sys1".into(), talkgroup: 9178, recording: true, start_time: 1_700_000_000.0, ..Default::default() };
         let out = testing::run::<Reporter>([
-            HostMessage::Hello(testing::hello(&dir, json!({"port": 0, "backfill": false}))),
+            HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false}))),
             HostMessage::CallStart(call),
             HostMessage::Audio(trunk_recorder_plugin::AudioChunk::new(7, 0, 9178, 8000, &[1, -1, 300])),
         ]);
@@ -362,7 +405,7 @@ mod tests {
     #[test]
     fn without_a_port_it_stores_but_does_not_serve() {
         let dir = testing::temp_dir("reporter-noport");
-        let out = testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"port": 0, "backfill": false})))]);
+        let out = testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false})))]);
         assert!(out.ready());
         assert_eq!(out.status(), Some((State::Ok, "not serving (Port is 0) · 0 calls stored".into())));
         assert!(!out.logs().iter().any(|(_, m)| m.contains("serving tr-engine")));
@@ -373,7 +416,7 @@ mod tests {
         let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = busy.local_addr().unwrap().port();
         let dir = testing::temp_dir("reporter-busy");
-        let out = testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"port": port, "backfill": false})))]);
+        let out = testing::run::<Reporter>([HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": port, "backfill": false})))]);
         assert!(!out.ready());
         let (state, msg) = out.status().unwrap();
         assert_eq!(state, State::Error);
@@ -398,7 +441,7 @@ mod tests {
         testing::call(&dir, "sys1", 101);
         testing::call(&dir, "sys1", 102);
         let (host, captured) = testing::capture();
-        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, ..Config::default() })).unwrap();
+        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, transcribe_url: String::new(), ..Config::default() })).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while captured.output().status().is_some_and(|(s, _)| s == State::Warning) {
             assert!(Instant::now() < deadline, "the backfill did not finish");
@@ -425,7 +468,7 @@ mod tests {
             .unwrap();
         drop(store);
         let (host, _captured) = testing::capture();
-        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, backfill: false, ..Config::default() })).unwrap();
+        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, transcribe_url: String::new(), backfill: false, ..Config::default() })).unwrap();
         let state: String = plugin.store.read(|c| c.query_row("SELECT state FROM calls", [], |r| r.get(0))).unwrap();
         assert_eq!(state, "ended");
         plugin.shutdown(Duration::from_secs(1));
@@ -435,7 +478,7 @@ mod tests {
     fn a_status_message_marks_the_recorder_seen() {
         let dir = testing::temp_dir("reporter-seen");
         let (host, _captured) = testing::capture();
-        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, backfill: false, ..Config::default() })).unwrap();
+        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, transcribe_url: String::new(), backfill: false, ..Config::default() })).unwrap();
         plugin.host_status.0.lock().unwrap().last_seen_ms = None;
         plugin.status(Status::default());
         let seen = plugin.host_status.snapshot();
@@ -444,17 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_mentions_transcripts_when_bridged() {
+        assert_eq!(status_line(Some("http://127.0.0.1:8092/"), 3, None), "http://127.0.0.1:8092/ · 3 calls stored");
+        assert_eq!(status_line(Some("http://127.0.0.1:8092/"), 3, Some(true)), "http://127.0.0.1:8092/ · 3 calls stored · transcripts: live");
+        assert_eq!(status_line(None, 0, Some(false)), "not serving (Port is 0) · 0 calls stored · transcripts: unreachable");
+    }
+
+    #[test]
     fn metrics_say_what_is_stored_and_where_it_is_served() {
         let dir = testing::temp_dir("reporter-metrics");
         let db = dir.join("engine.sqlite");
         let store = Store::open(&db).unwrap();
-        let m = metrics(&store, &db, Some("http://127.0.0.1:8092/"), 3, calls_stored(&store));
+        let m = metrics(&store, &db, Some("http://127.0.0.1:8092/"), 3, calls_stored(&store), None);
         assert_eq!(m.queued, Some(0));
         assert_eq!(m.extra["calls"], 0);
         assert_eq!(m.extra["serving"], "http://127.0.0.1:8092/");
         assert_eq!(m.extra["dropped_events"], 3);
         assert!(m.extra["store_mb"].as_f64().is_some_and(|mb| mb >= 0.0));
-        assert_eq!(metrics(&store, &db, None, 0, 7).extra["serving"], "not serving");
-        assert_eq!(metrics(&store, &db, None, 0, 7).extra["calls"], 7);
+        assert_eq!(metrics(&store, &db, None, 0, 7, None).extra["serving"], "not serving");
+        assert_eq!(metrics(&store, &db, None, 0, 7, None).extra["calls"], 7);
+        assert!(!m.extra.contains_key("transcripts_relayed"));
+        assert_eq!(metrics(&store, &db, None, 0, 7, Some(&RelayStatus::default())).extra["transcripts_relayed"], 0);
     }
 }

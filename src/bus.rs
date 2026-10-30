@@ -19,6 +19,8 @@ pub enum EventKind {
     UnitEvent,
     RecorderUpdate,
     RateUpdate,
+    /// A call's transcript arrived from the transcribe plugin.
+    Transcription,
 }
 
 impl EventKind {
@@ -30,6 +32,7 @@ impl EventKind {
             EventKind::UnitEvent => "unit_event",
             EventKind::RecorderUpdate => "recorder_update",
             EventKind::RateUpdate => "rate_update",
+            EventKind::Transcription => "transcription",
         }
     }
 }

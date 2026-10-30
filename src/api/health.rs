@@ -62,7 +62,11 @@ pub async fn health(State(state): State<AppState>) -> Response {
             last_seen: host.last_seen_ms.map(rfc3339),
         }],
         features: state.features,
-        transcribe: state.transcripts.as_ref().map(|t| TranscribeHealth { url: t.base().to_string(), connected: false, last_event_ms: None }),
+        transcribe: state.transcripts.as_ref().map(|t| TranscribeHealth {
+            url: t.base().to_string(),
+            connected: state.relay.as_ref().is_some_and(|r| r.connected()),
+            last_event_ms: state.relay.as_ref().and_then(|r| r.last_event_ms()),
+        }),
     };
     let status = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, Json(body)).into_response()
