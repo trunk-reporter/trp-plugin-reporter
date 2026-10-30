@@ -214,3 +214,46 @@ async fn one_call_and_talkgroup_and_unit_lists_are_filled_too() {
         assert_eq!(call["has_transcription"], true, "{url}: {call}");
     }
 }
+
+#[tokio::test]
+async fn a_failing_request_is_logged_only_when_the_relay_does_not_already_say_so() {
+    use std::sync::{Arc, Mutex};
+    // The plugin is not there; `relay` is how the relay stands (None: serve mode without one).
+    async fn lines(relay: Option<trunk_reporter::transcripts::relay::RelayStatus>) -> Vec<String> {
+        let (mut state, store, ..) = common::state_with(None);
+        let logs: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = logs.clone();
+        state.log = Arc::new(move |m| sink.lock().unwrap().push(m));
+        state.relay = relay;
+        let app = trunk_reporter::api::router(state.with_transcribe("http://127.0.0.1:1").unwrap());
+        let c1 = common::seed(&store).calls[0].0;
+        let (status, _) = common::get(&app, &format!("/api/v1/calls/{c1}/transcription")).await;
+        assert_eq!(status, 404);
+        let (status, _) = common::get(&app, &format!("/api/v1/transcriptions/batch?call_ids={c1}")).await;
+        assert_eq!(status, 200);
+        logs.lock().unwrap().clone()
+    }
+    let without_relay = lines(None).await;
+    assert_eq!(without_relay.len(), 2, "{without_relay:?}");
+    assert!(without_relay.iter().all(|m| m.starts_with("transcribe plugin: ")), "{without_relay:?}");
+    // A relay that is not connected has logged "not reachable" already.
+    let down = lines(Some(Default::default())).await;
+    assert!(down.is_empty(), "{down:?}");
+    // A connected relay (to a plugin that answers it) makes a failing request news.
+    let fake = fake_transcribe::start(vec![]).await;
+    let status = trunk_reporter::transcripts::relay::RelayStatus::default();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let client = Arc::new(TranscribeClient::new(&fake.url).unwrap());
+    let quiet: trunk_reporter::api::Log = Arc::new(|_| {});
+    let store = trunk_reporter::store::Store::in_memory();
+    let relay = tokio::spawn(trunk_reporter::transcripts::relay::run_relay(client, store, trunk_reporter::bus::Bus::new(10), status.clone(), quiet, stopped));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !status.connected() {
+        assert!(Instant::now() < deadline, "the relay never connected");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let up = lines(Some(status)).await;
+    assert_eq!(up.len(), 2, "{up:?}");
+    stop.send(true).unwrap();
+    relay.await.unwrap();
+}

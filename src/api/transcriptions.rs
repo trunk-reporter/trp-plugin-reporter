@@ -46,8 +46,13 @@ pub fn to_batch_entry(call_id: i64, t: &Transcript) -> Value {
     json!({ "call_id": call_id, "text": t.text.clone().unwrap_or_default(), "segments": t.segments.iter().map(segment).collect::<Vec<_>>() })
 }
 
-/// Log an unreachable plugin, once a minute per `key`.
+/// Log an unreachable plugin, once a minute per `key`. Not while the relay reports the
+/// plugin's stream down: it said "not reachable" once already, and an install without
+/// the plugin would otherwise log an error a minute for as long as pages are browsed.
 fn complain(state: &AppState, key: &'static str, err: &str) {
+    if state.relay.as_ref().is_some_and(|r| !r.connected()) {
+        return;
+    }
     if state.throttle.allow(key) {
         (state.log)(format!("transcribe plugin: {err}"));
     }
