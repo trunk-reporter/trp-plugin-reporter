@@ -120,7 +120,8 @@ pub fn serve_data_dir(data_dir: &Path) -> Result<ServerHandle, String> {
     };
     let affiliations = Affiliations::new();
     affiliations.rebuild(&store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?);
-    let mut state = AppState::new(store, Bus::new(BUS_RING), affiliations, capture_dir.into(), config.token.clone(), HostStatus::new(&host_name, false));
+    let mut state = AppState::new(store, Bus::new(BUS_RING), affiliations, capture_dir.into(), config.token.clone(), HostStatus::new(&host_name, false))
+        .with_transcribe(&config.transcribe_url)?;
     state.features = Features::SERVE;
     state.cors_origins = config.allowed_origins();
     state.log = Arc::new(|m| eprintln!("{m}"));

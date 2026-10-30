@@ -53,3 +53,17 @@ async fn a_down_plugin_is_an_error_not_a_panic() {
     assert!(client.one("a/b").await.is_err());
     assert!(started.elapsed() < Duration::from_secs(5));
 }
+
+#[tokio::test]
+async fn a_hanging_plugin_is_given_up_within_the_timeout() {
+    let fake = fake_transcribe::start(vec![]).await;
+    fake.hang();
+    let (state, store, ..) = common::state_with(None);
+    let app = trunk_reporter::api::router(state.with_transcribe(&fake.url).unwrap());
+    let c1 = common::seed(&store).calls[0].0;
+    let started = Instant::now();
+    let (status, v) = common::get(&app, &format!("/api/v1/calls/{c1}")).await;
+    assert_eq!(status, 200);
+    assert!(started.elapsed() < Duration::from_secs(12), "took {:?}", started.elapsed());
+    assert!(v.get("transcription_text").is_none(), "{v}");
+}

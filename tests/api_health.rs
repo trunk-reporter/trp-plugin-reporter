@@ -22,6 +22,24 @@ async fn health_is_open_and_shaped() {
 }
 
 #[tokio::test]
+async fn health_says_transcriptions_when_a_transcribe_url_is_set() {
+    let app = trunk_reporter::api::router(state_with(None).0.with_transcribe("http://127.0.0.1:8767").unwrap());
+    let (s, v) = get(&app, "/api/v1/health").await;
+    assert_eq!(s, 200);
+    assert_schema(&v, "HealthResponse");
+    assert_eq!(v["features"]["transcriptions"], true);
+    assert_eq!(v["transcribe"]["url"], "http://127.0.0.1:8767");
+    assert_eq!(v["transcribe"]["connected"], false);
+    assert!(v["transcribe"]["last_event_ms"].is_null(), "{v}");
+    // A blank URL leaves the bridge off.
+    let blank = trunk_reporter::api::router(state_with(None).0.with_transcribe("  ").unwrap());
+    assert_eq!(get(&blank, "/api/v1/health").await.1["features"]["transcriptions"], false);
+    let (_, v) = get(&app_with(None).0, "/api/v1/health").await;
+    assert_eq!(v["features"]["transcriptions"], false);
+    assert!(v.get("transcribe").is_none(), "{v}");
+}
+
+#[tokio::test]
 async fn auth_init_says_open_or_token() {
     let (s, v) = get(&app().0, "/api/v1/auth-init").await;
     assert_eq!(s, 200);

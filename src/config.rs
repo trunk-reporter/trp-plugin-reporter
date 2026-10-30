@@ -29,11 +29,23 @@ pub struct Config {
     ///
     /// Web pages served from these origins may call the API. One origin per line, such as http://192.168.1.20:8081.
     pub cors_origins: Vec<String>,
+    /// Transcribe plugin URL
+    ///
+    /// Where the transcribe plugin serves its transcripts. Leave empty when it isn't installed.
+    pub transcribe_url: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { port: 8092, bind: "127.0.0.1".into(), token: None, retention_days: 0, backfill: true, cors_origins: Vec::new() }
+        Config {
+            port: 8092,
+            bind: "127.0.0.1".into(),
+            token: None,
+            retention_days: 0,
+            backfill: true,
+            cors_origins: Vec::new(),
+            transcribe_url: "http://127.0.0.1:8767".into(),
+        }
     }
 }
 
@@ -67,5 +79,13 @@ mod tests {
         let s = trunk_recorder_plugin::schema::schema_for::<Config>();
         assert_eq!(s["properties"]["token"]["x-secret"], true);
         assert_eq!(s["properties"]["port"]["default"], 8092);
+    }
+
+    #[test]
+    fn the_transcribe_url_defaults_to_the_local_plugin() {
+        assert_eq!(Config::default().transcribe_url, "http://127.0.0.1:8767");
+        let s = trunk_recorder_plugin::schema::schema_for::<Config>();
+        assert_eq!(s["properties"]["transcribeUrl"]["title"], "Transcribe plugin URL");
+        assert_eq!(s["properties"]["transcribeUrl"]["default"], "http://127.0.0.1:8767");
     }
 }

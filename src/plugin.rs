@@ -198,7 +198,11 @@ impl Plugin for Reporter {
             None
         } else {
             let mut state =
-                AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone());
+                AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone())
+                    .with_transcribe(&config.transcribe_url)?;
+            if let Some(t) = &state.transcripts {
+                host.info(format!("reading transcripts from {}", t.base()));
+            }
             let log = host.clone();
             state.cors_origins = config.allowed_origins();
             state.log = Arc::new(move |m| log.error(m));

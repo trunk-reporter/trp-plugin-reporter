@@ -20,6 +20,18 @@ pub struct HealthResponse {
     pub checks: Checks,
     pub trunk_recorders: Vec<TrunkRecorder>,
     pub features: Features,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcribe: Option<TranscribeHealth>,
+}
+
+/// How the bridge to the transcribe plugin stands.
+#[derive(Serialize)]
+pub struct TranscribeHealth {
+    pub url: String,
+    /// Whether the plugin's event stream is open.
+    pub connected: bool,
+    /// When the last event arrived from it (ms since the epoch).
+    pub last_event_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +62,7 @@ pub async fn health(State(state): State<AppState>) -> Response {
             last_seen: host.last_seen_ms.map(rfc3339),
         }],
         features: state.features,
+        transcribe: state.transcripts.as_ref().map(|t| TranscribeHealth { url: t.base().to_string(), connected: false, last_event_ms: None }),
     };
     let status = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, Json(body)).into_response()

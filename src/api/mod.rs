@@ -33,6 +33,8 @@ use crate::affiliations::Affiliations;
 use crate::audio::AudioBus;
 use crate::bus::Bus;
 use crate::store::Store;
+use crate::transcripts::Throttle;
+use crate::transcripts::client::TranscribeClient;
 use crate::web::{self, Pages};
 
 pub use types::{ApiError, Features, hex, rfc3339};
@@ -100,6 +102,10 @@ pub struct AppState {
     pub audio_clients: Arc<AtomicUsize>,
     /// How often a live-audio client gets a keepalive message.
     pub audio_keepalive: Duration,
+    /// The transcribe plugin's client; `None` and the bridge is off.
+    pub transcripts: Option<Arc<TranscribeClient>>,
+    /// Rate-limits the log lines about an unreachable transcribe plugin: one per minute.
+    pub throttle: Throttle,
 }
 
 /// A sink for messages an operator should see.
@@ -125,7 +131,20 @@ impl AppState {
             audio: None,
             audio_clients: Arc::new(AtomicUsize::new(0)),
             audio_keepalive: audio::KEEPALIVE,
+            transcripts: None,
+            throttle: Throttle::new(Duration::from_secs(60)),
         }
+    }
+
+    /// Reads transcripts from the transcribe plugin at `url` and says so in `/health`. A blank
+    /// `url` leaves the bridge off.
+    pub fn with_transcribe(mut self, url: &str) -> Result<AppState, String> {
+        if url.trim().is_empty() {
+            return Ok(self);
+        }
+        self.transcripts = Some(Arc::new(TranscribeClient::new(url)?));
+        self.features.transcriptions = true;
+        Ok(self)
     }
 }
 
