@@ -30,6 +30,8 @@ regex = "1"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 walkdir = "2"
 futures-util = "0.3"
+# The client for the transcribe plugin (rustls keeps the Windows build free of OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dev-dependencies]
 # Reading response bodies in the API tests.

@@ -11,4 +11,5 @@ pub mod ingest;
 pub mod plugin;
 pub mod server;
 pub mod store;
+pub mod transcripts;
 pub mod web;

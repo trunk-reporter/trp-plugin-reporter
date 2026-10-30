@@ -28,6 +28,8 @@ use trunk_reporter::store::talkgroups::{TgTags, touch_talkgroup};
 use trunk_reporter::store::units::{NewUnitEvent, insert_unit_event, touch_unit, transmission_events};
 use trunk_reporter::store::{CallId, SiteId, Store, SystemId, now_ms};
 
+pub mod fake_transcribe;
+
 /// The host name the test app's health reports.
 pub const HOST: &str = "trunk-recorder";
 
