@@ -7,7 +7,9 @@
 Transcripts from the `transcribe` plugin.
 
 - New setting "Transcribe plugin URL" (`transcribeUrl`, default
-  `http://127.0.0.1:8767`); empty turns transcripts off.
+  `http://127.0.0.1:8767`); empty turns transcripts off. Upgrades get the
+  bridge on by default: without a transcribe plugin, empty the URL to turn it
+  off.
 - `GET /calls/{id}/transcription` and `GET /transcriptions/batch` answer from the
   transcribe plugin, and calls carry `has_transcription` and
   `transcription_text`. Search, verify, reject, exclude, the queue and backfill

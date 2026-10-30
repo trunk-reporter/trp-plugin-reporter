@@ -3424,7 +3424,7 @@ paths:
             Comma-separated event types to subscribe to. Omit for all
             event types. Valid values: `call_start`, `call_update`,
             `call_end`, `unit_event`, `recorder_update`, `rate_update`,
-            `trunking_message`, `console`.
+            `trunking_message`, `console`, `transcription`.
 
             Supports compound syntax with `:` to filter on event
             subtypes. For example, `unit_event:call` matches only unit
@@ -7320,6 +7320,7 @@ components:
         - rate_update
         - trunking_message
         - console
+        - transcription
       description: |
         SSE event types pushed to clients:
         - **call_start**: new call recording began
@@ -7330,6 +7331,8 @@ components:
         - **rate_update**: decode rate update from a system
         - **trunking_message**: P25 control channel message
         - **console**: trunk-recorder console log message
+        - **transcription**: a call's transcript arrived, with
+          `{ call_id, system_id, tgid, text, start_time }`
 
     SSEEvent:
       type: object

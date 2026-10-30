@@ -47,16 +47,22 @@ first starts, so it opens the history you have. The CHANGELOG has the steps.
 
 Trunk Reporter shows transcripts from the `transcribe` plugin. Set "Transcribe
 plugin URL" to that plugin's local API (the default is
-`http://127.0.0.1:8767`); leave it empty to turn transcripts off.
+`http://127.0.0.1:8767`); leave it empty to turn transcripts off. Upgrades get
+the bridge on by default: without a transcribe plugin, empty the URL to turn it
+off. A transcribe plugin on another host must be bound beyond 127.0.0.1 on its
+side.
 
 - `GET /calls/{id}/transcription` and `GET /transcriptions/batch` answer from
   the transcribe plugin.
-- Calls, in lists and singly, carry `has_transcription` and `transcription_text`.
+- Calls, in lists and singly, carry `has_transcription` and `transcription_text`
+  (not `/calls/active`: calls on the air have no transcript yet).
 - A `transcription` event on `/events/stream` announces a transcript as it
   lands, with `{ call_id, system_id, tgid, text, start_time }`.
 - `/health` has `features.transcriptions` and a `transcribe` block with the
-  `url`, whether it is `connected`, and `last_event_ms`. The plugin's status
-  line says `transcripts: live` or `transcripts: unreachable`.
+  `url`, whether it is `connected`, and `last_event_ms` (the `transcribedMs`
+  of the last transcript relayed, ms since the epoch); the block is absent
+  when the bridge is off. The plugin's status line says `transcripts: live` or
+  `transcripts: unreachable`.
 
 The transcribe plugin keeps the transcripts; Trunk Reporter stores none of
 them. Calls it skipped or failed read as having no transcript. Search, verify,
