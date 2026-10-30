@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod sse;
+
+pub use sse::{Frame, SseParser};
 
 /// A transcript as the transcribe plugin serves it. Fields this crate does not know are ignored.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
