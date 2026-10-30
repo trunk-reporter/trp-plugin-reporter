@@ -3382,6 +3382,7 @@ paths:
         | `rate_update` | Decode rate update | DecodeRate object |
         | `trunking_message` | P25 control channel message | TrunkingMessage object |
         | `console` | TR console log message | ConsoleMessage object |
+        | `transcription` | A call's transcript landed (from the transcribe plugin) | `{ call_id, system_id, tgid, text, start_time }` |
 
       tags: [events]
       parameters:

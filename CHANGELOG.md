@@ -10,6 +10,22 @@
 - The shared audio engine starts a new talkgroup at full volume with its stereo
   position assigned. Pages that mute on their own (the scanner) are unchanged.
 
+## [0.3.0]
+
+Transcripts from the `transcribe` plugin.
+
+- New setting "Transcribe plugin URL" (`transcribeUrl`, default
+  `http://127.0.0.1:8767`); empty turns transcripts off.
+- `GET /calls/{id}/transcription` and `GET /transcriptions/batch` answer from the
+  transcribe plugin, and calls carry `has_transcription` and
+  `transcription_text`. Search, verify, reject, exclude, the queue and backfill
+  stay 501; word timing is not carried.
+- A `transcription` event on `/events/stream`, with
+  `{ call_id, system_id, tgid, text, start_time }`.
+- `/health` has `features.transcriptions` and a `transcribe` block
+  (`url`, `connected`, `last_event_ms`); the status line says
+  `transcripts: live` or `transcripts: unreachable`.
+
 ## [0.2.0]
 
 Phase 2: what the web pages need beyond phase 1.

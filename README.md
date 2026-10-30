@@ -30,6 +30,7 @@ first starts, so it opens the history you have. The CHANGELOG has the steps.
 | Keep history for (days) | 0 | 0 keeps everything. |
 | Backfill from recorded calls on start | on | See Backfill. |
 | Allowed origins | none | Web pages served from these origins may call the API. One origin per line, such as `http://192.168.1.20:8081`. |
+| Transcribe plugin URL | `http://127.0.0.1:8767` | Where the transcribe plugin's local API is. Empty turns transcripts off. See Transcripts. |
 
 ## What you get
 
@@ -41,6 +42,26 @@ first starts, so it opens the history you have. The CHANGELOG has the steps.
   `/preferences/{key}` and `/audio/live`.
 - The pages at `http://127.0.0.1:8092/`. The Website link on the plugin's card
   in TRP opens them.
+
+## Transcripts
+
+Trunk Reporter shows transcripts from the `transcribe` plugin. Set "Transcribe
+plugin URL" to that plugin's local API (the default is
+`http://127.0.0.1:8767`); leave it empty to turn transcripts off.
+
+- `GET /calls/{id}/transcription` and `GET /transcriptions/batch` answer from
+  the transcribe plugin.
+- Calls, in lists and singly, carry `has_transcription` and `transcription_text`.
+- A `transcription` event on `/events/stream` announces a transcript as it
+  lands, with `{ call_id, system_id, tgid, text, start_time }`.
+- `/health` has `features.transcriptions` and a `transcribe` block with the
+  `url`, whether it is `connected`, and `last_event_ms`. The plugin's status
+  line says `transcripts: live` or `transcripts: unreachable`.
+
+The transcribe plugin keeps the transcripts; Trunk Reporter stores none of
+them. Calls it skipped or failed read as having no transcript. Search, verify,
+reject and exclude, the queue and backfill are not built and answer 501, and
+word timing is not carried.
 
 ## Live audio
 
@@ -82,7 +103,7 @@ calls on start" off to start with an empty history.
 
 ## Not built yet
 
-Transcription, talkgroup directory import, trunking messages, call groups, the
+Transcript search and review, talkgroup directory import, trunking messages, call groups, the
 other statistics and analytics endpoints, and user accounts are not
 implemented. Their endpoints answer 501 with the error code `not_implemented`.
 
