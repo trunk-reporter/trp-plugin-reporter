@@ -10,6 +10,7 @@ pub mod sse;
 pub mod stats;
 pub mod systems;
 pub mod talkgroups;
+pub mod transcriptions;
 pub mod types;
 pub mod units;
 
@@ -265,8 +266,8 @@ pub fn router(state: AppState) -> Router {
         .route("/calls/{id}/audio", get(calls::audio))
         .route("/calls/{id}/frequencies", get(calls::call_frequencies))
         .route("/calls/{id}/transmissions", get(calls::call_transmissions))
-        .route("/calls/{id}/transcription", get(calls::transcription).fallback(not_implemented))
-        .route("/transcriptions/batch", get(calls::transcriptions_batch))
+        .route("/calls/{id}/transcription", get(transcriptions::transcription).fallback(not_implemented))
+        .route("/transcriptions/batch", get(transcriptions::transcriptions_batch))
         .route("/preferences/{key}", get(preferences::get).put(preferences::put).layer(axum::extract::DefaultBodyLimit::max(preferences::MAX_BYTES + 1)))
         .route("/query", post(query_forbidden));
     for path in OUT_OF_SCOPE {

@@ -526,6 +526,17 @@ pub fn newest_start_ms(conn: &Connection, system: SystemId) -> rusqlite::Result<
     conn.query_row("SELECT MAX(start_ms) FROM calls WHERE system_id = ?1", [system], |r| r.get(0))
 }
 
+/// The call recorded at `path`, whichever way the slashes lean: the forward-slash form first,
+/// then the same with backslashes (a backfill on Windows stored its paths so).
+pub fn call_by_path(conn: &Connection, path: &str) -> rusqlite::Result<Option<CallRow>> {
+    let forward = crate::transcripts::normalize_path(path);
+    let sql = format!("SELECT {CALL_COLS} FROM calls WHERE path = ?1");
+    if let Some(row) = conn.query_row(&sql, [&forward], call_row).optional()? {
+        return Ok(Some(row));
+    }
+    conn.query_row(&sql, [forward.replace('/', "\\")], call_row).optional()
+}
+
 /// Whether a call with this `path` is stored.
 pub fn path_exists(conn: &Connection, path: &str) -> rusqlite::Result<bool> {
     conn.query_row("SELECT EXISTS(SELECT 1 FROM calls WHERE path = ?1)", [path], |r| r.get(0))

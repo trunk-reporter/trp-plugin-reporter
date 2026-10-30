@@ -668,6 +668,9 @@ pub struct CallUnit {
 /// fields other than `has_transcription` are left out (they are optional).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Call {
+    /// The recording path, the key that joins a transcript; not part of the API shape.
+    #[serde(skip)]
+    pub path: Option<String>,
     pub call_id: i64,
     pub system_id: i64,
     pub system_name: String,
@@ -746,6 +749,7 @@ impl Call {
         let concluded = row.state == "concluded";
         let audio_url = (row.recorded && concluded && row.audio_path.is_some()).then(|| format!("/api/v1/calls/{}/audio", row.id.0));
         Ok(Call {
+            path: row.path.clone(),
             call_id: row.id.0,
             system_id: row.system_id.0,
             system_name: system.as_ref().map(display_name).unwrap_or_default(),
