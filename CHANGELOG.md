@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+Built on plugin SDK 0.9.0 (Trunk Recorder Pro 0.3.0's), a git dependency on the
+recorder's `v0.3.0` tag until 0.9 is on crates.io; it was 0.5.0. With 0.3.0:
+
+- Settings take effect without a restart (`live_settings`), except "Backfill from
+  recorded calls on start", which waits for the next start. A change that
+  moves the server, or changes its token or allowed origins, closes open event
+  streams and live audio. A taken port or a bad bind address or transcribe URL
+  is refused, and the plugin keeps serving as before.
+- The backfill also asks the recorder's call store (`calls.query`) for the calls
+  it indexes, so calls whose JSON file isn't kept (the call log off) are found
+  too. It walks the whole store once, then on later starts only what is new.
+- Systems take their names, and their sites are listed, from `hello`, before
+  any traffic.
+- Unit events name their radio and talkgroup, and a call's start names its
+  radios, so a radio heard only on the control channel gets its name.
+- Stopping the server closes the event streams and live audio still open,
+  instead of leaving them to the process's exit.
+
+Older recorders run it as before, without these. A call's `metadata_json` still has the
+record's fields that have no column (`nac`, `transmission_id`, `tones`,
+`tone_patterns`, `signals`, …), now that the SDK knows them by name.
+
 ## [0.3.0]
 
 Transcripts from the `transcribe` plugin.

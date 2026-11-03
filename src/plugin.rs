@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::watch;
-use trunk_recorder_plugin::{AudioChunk, CallInfo, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic};
+use trunk_recorder_plugin::{
+    AudioChunk, CallInfo, CallsPage, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic,
+};
 
 use crate::affiliations::Affiliations;
 use crate::api::{AppState, HostStatus};
@@ -19,6 +21,7 @@ use crate::backfill::backfill;
 use crate::bus::Bus;
 use crate::config::{Config, SystemConfig};
 use crate::ingest::Ingest;
+use crate::recall::Recall;
 use crate::server::{self, BUS_RING, ServerHandle, WEEK_MS};
 use crate::store::calls::end_stale_calls;
 use crate::store::recorder::{decimate, retain};
@@ -38,20 +41,72 @@ const HOUR: Duration = Duration::from_secs(3_600);
 const DAY: Duration = Duration::from_secs(86_400);
 /// The longest the server's stop may take of the shutdown grace.
 const SERVER_STOP: Duration = Duration::from_secs(2);
+/// How long a server being replaced (new settings) waits for its open requests.
+const RESTART_STOP: Duration = Duration::from_millis(500);
+/// How long a relay being replaced is waited for.
+const RELAY_STOP: Duration = Duration::from_secs(1);
 
 pub struct Reporter {
+    host: Host,
     ingest: Ingest,
     store: Store,
+    bus: Bus,
+    affiliations: Affiliations,
+    capture_dir: PathBuf,
+    /// The store's file.
+    db: PathBuf,
+    /// The settings it runs with: the start's, then each change it took.
+    config: Config,
     /// What `/health` says of the recorder: touched on every `status`.
     host_status: HostStatus,
+    /// When the plugin started (the API's uptime, across server restarts).
+    started: Instant,
     server: Option<ServerHandle>,
     maintenance: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     /// Set at shutdown: a backfill still walking stops (and stays incomplete).
     stop_backfill: Arc<AtomicBool>,
+    /// Set while a backfill runs: it owns the status line, and maintenance leaves it alone.
+    backfilling: Arc<AtomicBool>,
     /// The recorder's live audio, for `/audio/live`'s clients.
     audio: AudioBus,
     /// The relay of the transcribe plugin's event stream, when the bridge is on.
-    relay: Option<(watch::Sender<bool>, JoinHandle<()>)>,
+    relay: Option<Relay>,
+    /// The backfill from the recorder's call store, while it walks.
+    recall: Option<Recall>,
+}
+
+/// The transcripts bridge: the transcribe plugin's client, and the relay of its event stream.
+struct Relay {
+    client: Arc<TranscribeClient>,
+    status: RelayStatus,
+    stop: watch::Sender<bool>,
+    thread: JoinHandle<()>,
+}
+
+impl Relay {
+    /// The relay of `url`'s events, or none when the URL is empty (the bridge off).
+    fn start(host: &Host, store: &Store, bus: &Bus, url: &str) -> Result<Option<Relay>, String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Ok(None);
+        }
+        let client = Arc::new(TranscribeClient::new(url)?);
+        host.info(format!("reading transcripts from {}", client.base()));
+        let h = host.clone();
+        let (status, stop, thread) = spawn_relay(client.clone(), store.clone(), bus.clone(), Arc::new(move |m| h.info(m)));
+        Ok(Some(Relay { client, status, stop, thread }))
+    }
+
+    /// Stop it, waiting for its thread until `deadline`; one still running then is left to end at its next await.
+    fn stop(self, deadline: Instant) {
+        let _ = self.stop.send(true);
+        while !self.thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.thread.is_finished() {
+            let _ = self.thread.join();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -79,10 +134,11 @@ fn status_line(serving: Option<&str>, calls: i64, transcripts: Option<bool>) -> 
     }
 }
 
-/// The relay's state when the status line should be set again for it: the bridge
-/// is on and its stream opened or closed since `reported` (`None`: never reported).
-fn relay_change(now: Option<bool>, reported: Option<bool>) -> Option<bool> {
-    now.filter(|c| reported != Some(*c))
+/// Whether the status line should be set again: it hasn't been (`reported`
+/// is `None`), or the transcripts relay's stream opened or closed since
+/// (`relay`: whether it is open, `None` when the bridge is off).
+fn status_due(relay: Option<bool>, reported: Option<Option<bool>>) -> bool {
+    reported != Some(relay)
 }
 
 /// The database file and its write-ahead log, in bytes.
@@ -107,9 +163,10 @@ fn metrics(store: &Store, db: &Path, serving: Option<&str>, dropped: u64, calls:
 }
 
 /// Metrics every [`TICK`] (the call count every [`CALLS_EVERY`]); recorder samples thinned hourly and old history
-/// deleted daily (both first a minute after start). The status line is set again
-/// whenever the transcripts relay's stream opens or closes, except while a backfill
-/// (`backfilling`) owns the status. Stops when the sender is used or dropped.
+/// deleted daily (both first a minute after start). The status line is set on the
+/// first tick and again whenever the transcripts relay's stream opens or closes,
+/// except while a backfill (`backfilling`) owns the status (and once it is over).
+/// Stops when the sender is used or dropped.
 #[allow(clippy::too_many_arguments)]
 fn maintenance(
     host: Host,
@@ -128,8 +185,8 @@ fn maintenance(
             let first = Instant::now() + FIRST_UPKEEP;
             let (mut next_decimate, mut next_retain) = (first, first);
             let mut calls: Option<(Instant, i64)> = None;
-            // The relay state the status line last showed.
-            let mut reported: Option<bool> = None;
+            // The relay state the status line last showed (`None`: not set yet).
+            let mut reported: Option<Option<bool>> = None;
             // A message or a dropped sender ends it.
             while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(TICK) {
                 let count = match calls {
@@ -141,10 +198,11 @@ fn maintenance(
                     }
                 };
                 host.metrics(&metrics(&store, &db, serving.as_deref(), dropped.load(Ordering::Relaxed), count, relay.as_ref()));
-                if !backfilling.load(Ordering::Relaxed)
-                    && let Some(connected) = relay_change(relay.as_ref().map(RelayStatus::connected), reported)
-                {
-                    host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), Some(connected)));
+                let connected = relay.as_ref().map(RelayStatus::connected);
+                if backfilling.load(Ordering::Relaxed) {
+                    reported = None;
+                } else if status_due(connected, reported) {
+                    host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), connected));
                     reported = Some(connected);
                 }
                 let now = Instant::now();
@@ -188,6 +246,8 @@ impl Plugin for Reporter {
             // `--describe` has no settings, so this is the default port's URL;
             // a changed port is only in the log and status line.
             homepage: "http://127.0.0.1:8092/".into(),
+            // New settings reach `settings` instead of restarting the plugin (recorders from 0.3.0).
+            live_settings: true,
             ..trunk_recorder_plugin::manifest!()
         }
     }
@@ -218,61 +278,54 @@ impl Plugin for Reporter {
             Ok(ingest)
         };
         let ingest = new_ingest()?;
+        let walker = if setup.config.backfill { Some(new_ingest()?) } else { None };
+        let recaller = if setup.config.backfill { Some(new_ingest()?) } else { None };
         let recent = store.read(|c| affiliation_events_since(c, now_ms() - WEEK_MS)).map_err(|e| e.to_string())?;
         affiliations.rebuild(&recent);
 
         let audio = AudioBus::new(BUS_CAPACITY);
         #[cfg(test)]
         AUDIO_TAP.with(|t| *t.borrow_mut() = Some(audio.subscribe()));
-        let config = &setup.config;
-        // The relay runs whether or not the API is served. Its sender, dropped by an
-        // early return below, stops it.
-        let transcribe = match config.transcribe_url.trim() {
-            "" => None,
-            url => Some(Arc::new(TranscribeClient::new(url)?)),
-        };
-        let (relay_status, relay) = match &transcribe {
-            Some(client) => {
-                host.info(format!("reading transcripts from {}", client.base()));
-                let h = host.clone();
-                let (status, stop, thread) = spawn_relay(client.clone(), store.clone(), bus.clone(), Arc::new(move |m| h.info(m)));
-                (Some(status), Some((stop, thread)))
-            }
-            None => (None, None),
-        };
+        // The relay runs whether or not the API is served. An early return below
+        // drops its sender, which stops it.
+        let relay = Relay::start(&host, &store, &bus, &setup.config.transcribe_url)?;
         let host_status = HostStatus::new(&setup.host.name, true);
         host_status.touch(now_ms());
-        let server = if config.port == 0 {
-            None
-        } else {
-            let mut state =
-                AppState::new(store.clone(), bus.clone(), affiliations.clone(), setup.capture_dir.clone(), config.token.clone(), host_status.clone());
-            if let Some(client) = &transcribe {
-                state = state.with_transcribe_client(client.clone());
-            }
-            state.relay = relay_status.clone();
-            let log = host.clone();
-            state.cors_origins = config.allowed_origins();
-            state.log = Arc::new(move |m| log.error(m));
-            state.audio = Some(audio.clone());
-            Some(server::start(state, &config.bind, config.port)?)
+        let mut reporter = Reporter {
+            host: host.clone(),
+            ingest,
+            store: store.clone(),
+            bus,
+            affiliations,
+            capture_dir: setup.capture_dir.clone(),
+            db: path,
+            config: setup.config,
+            host_status,
+            started: Instant::now(),
+            server: None,
+            maintenance: None,
+            stop_backfill: Arc::new(AtomicBool::new(false)),
+            backfilling: Arc::new(AtomicBool::new(walker.is_some())),
+            audio,
+            relay,
+            recall: None,
         };
-        let serving = server.as_ref().map(ServerHandle::url);
+        let config = reporter.config.clone();
+        if config.port != 0 {
+            reporter.server = Some(server::start(reporter.app_state(&config), &config.bind, config.port)?);
+        }
+        let serving = reporter.serving();
         if let Some(url) = &serving {
             host.info(format!("serving tr-engine's API and pages at {url}"));
         }
 
-        let stop_backfill = Arc::new(AtomicBool::new(false));
-        // While set, the backfill owns the status line and maintenance leaves it alone.
-        let backfilling = Arc::new(AtomicBool::new(config.backfill));
+        let relay_status = reporter.relay.as_ref().map(|r| r.status.clone());
         // The status is set before the backfill starts, so its own (the
         // last word once it ends) cannot be overwritten by this one.
-        if config.backfill {
+        if let Some(mut walker) = walker {
             host.status(State::Warning, "backfilling: 0 calls");
-            let mut walker = new_ingest()?;
             let systems: Vec<_> = store.read(list_systems).map_err(|e| e.to_string())?.into_iter().map(|s| (s.id, s.short_name)).collect();
-            let (host, store, capture_dir, serving, stop) = (host.clone(), store.clone(), setup.capture_dir.clone(), serving.clone(), stop_backfill.clone());
-            let (relay_status, backfilling) = (relay_status.clone(), backfilling.clone());
+            let (host, capture_dir, stop, backfilling) = (host.clone(), setup.capture_dir, reporter.stop_backfill.clone(), reporter.backfilling.clone());
             std::thread::Builder::new()
                 .name("backfill".into())
                 .spawn(move || {
@@ -299,6 +352,7 @@ impl Plugin for Reporter {
                             report.ingested, report.files, report.skipped_known, report.skipped_new, report.bad
                         ));
                     }
+                    // (Where it is served as it started: maintenance says it again, as it is now, at its next tick.)
                     host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
                     backfilling.store(false, Ordering::Relaxed);
                 })
@@ -307,8 +361,53 @@ impl Plugin for Reporter {
             host.status(State::Ok, status_line(serving.as_deref(), calls_stored(&store), relay_status.as_ref().map(RelayStatus::connected)));
         }
 
-        let maintenance = maintenance(host.clone(), store.clone(), path, serving, ingest.dropped_counter(), config.retention_days, relay_status, backfilling)?;
-        Ok(Reporter { ingest, store, host_status, server, maintenance: Some(maintenance), stop_backfill, audio, relay })
+        // Beside the folder walk: the recorder's call store has the calls whose JSON isn't kept.
+        if let Some(ingest) = recaller {
+            reporter.recall = Some(Recall::start(host.clone(), ingest, reporter.capture_dir.clone(), reporter.stop_backfill.clone())?);
+        }
+        reporter.start_maintenance()?;
+        Ok(reporter)
+    }
+
+    /// New settings, taken without a restart. A bad bind address or
+    /// transcribe URL, or a port that is in use, leaves the settings it had,
+    /// served as they were. A server that moves or changes its token or
+    /// origins closes its open event streams and live audio (clients reconnect).
+    /// "Backfill on start" waits for the next start.
+    fn settings(&mut self, setup: Setup<Config, SystemConfig>) -> Result<(), String> {
+        self.ingest.declare(&setup.systems).map_err(|e| e.to_string())?;
+        let new = setup.config;
+        let old = &self.config;
+        let bridge_changes = new.transcribe_url.trim() != old.transcribe_url.trim();
+        let server_changes =
+            bridge_changes || (new.port, new.bind.trim(), &new.token, new.allowed_origins()) != (old.port, old.bind.trim(), &old.token, old.allowed_origins());
+        if server_changes {
+            // What can be checked is, before anything stops.
+            if bridge_changes && !new.transcribe_url.trim().is_empty() {
+                TranscribeClient::new(&new.transcribe_url)?;
+            }
+            if new.port != 0 {
+                server::bind_ip(&new.bind)?;
+            }
+            let listener = self.rebind(&new)?;
+            // Nothing fails from here.
+            if bridge_changes {
+                if let Some(relay) = self.relay.take() {
+                    relay.stop(Instant::now() + RELAY_STOP);
+                }
+                self.relay = Relay::start(&self.host, &self.store, &self.bus, &new.transcribe_url)?;
+            }
+            if let Some(listener) = listener {
+                self.server = Some(server::serve_on(self.app_state(&new), listener)?);
+            }
+            match self.serving() {
+                Some(url) => self.host.info(format!("serving tr-engine's API and pages at {url}")),
+                None => self.host.info("not serving (Port is 0)"),
+            }
+        }
+        self.config = new;
+        // Its retention, and where it serves, as they are now; it sets the status line again.
+        self.start_maintenance()
     }
 
     fn call_start(&mut self, call: CallInfo) {
@@ -340,36 +439,121 @@ impl Plugin for Reporter {
         self.audio.publish(AudioFrame { system_id: system_id.0, tgid: chunk.talkgroup, sample_rate, pcm });
     }
 
+    /// A page of the recorder's calls, for the backfill that asked.
+    fn calls(&mut self, request: u64, page: CallsPage) {
+        if let Some(recall) = &self.recall {
+            recall.page(request, page);
+        }
+    }
+
     fn status(&mut self, status: Status) {
         self.host_status.touch(now_ms());
         self.ingest.handle(HostMessage::Status(status));
     }
 
-    /// A running backfill is told to stop, then maintenance, then the transcripts relay (waited
+    /// A running backfill is told to stop (the call store's waited for within `grace`), then maintenance, then the transcripts relay (waited
     /// for within `grace`), then the server (at most 2 s of `grace`), then every
     /// queued write. The flush runs even when the grace is spent: the
     /// history matters more than the deadline.
     fn shutdown(&mut self, grace: Duration) {
         let deadline = Instant::now() + grace;
         self.stop_backfill.store(true, Ordering::Relaxed);
-        if let Some((stop, thread)) = self.maintenance.take() {
-            let _ = stop.send(());
-            let _ = thread.join();
+        if let Some(recall) = self.recall.take() {
+            recall.stop(deadline);
         }
-        if let Some((stop, thread)) = self.relay.take() {
-            // It ends at its next await; a thread still running at the deadline is left to the exit.
-            let _ = stop.send(true);
-            while !thread.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            }
+        self.stop_maintenance();
+        if let Some(relay) = self.relay.take() {
+            relay.stop(deadline);
         }
         if let Some(server) = self.server.take() {
             server.stop_within(deadline.saturating_duration_since(Instant::now()).min(SERVER_STOP));
         }
         self.store.flush();
+    }
+}
+
+impl Reporter {
+    /// Where the API is served, when it is.
+    fn serving(&self) -> Option<String> {
+        self.server.as_ref().map(ServerHandle::url)
+    }
+
+    /// The API's state for `config`, with the transcripts bridge as it is now.
+    fn app_state(&self, config: &Config) -> AppState {
+        let mut state = AppState::new(
+            self.store.clone(),
+            self.bus.clone(),
+            self.affiliations.clone(),
+            self.capture_dir.clone(),
+            config.token.clone(),
+            self.host_status.clone(),
+        );
+        state.started = self.started;
+        if let Some(relay) = &self.relay {
+            state = state.with_transcribe_client(relay.client.clone());
+            state.relay = Some(relay.status.clone());
+        }
+        let log = self.host.clone();
+        state.cors_origins = config.allowed_origins();
+        state.log = Arc::new(move |m| log.error(m));
+        state.audio = Some(self.audio.clone());
+        state
+    }
+
+    /// The old server stopped and a socket for `new`'s address bound (none
+    /// for port 0). A new port is bound while the old server still serves;
+    /// the same port, once it has let go. A failed bind leaves the old server
+    /// serving (started again on its address, when it had let go).
+    fn rebind(&mut self, new: &Config) -> Result<Option<std::net::TcpListener>, String> {
+        if new.port == 0 {
+            if let Some(old) = self.server.take() {
+                old.stop_within(RESTART_STOP);
+            }
+            return Ok(None);
+        }
+        if self.server.as_ref().is_none_or(|s| s.addr.port() != new.port) {
+            let listener = server::listen(&new.bind, new.port)?;
+            if let Some(old) = self.server.take() {
+                old.stop_within(RESTART_STOP);
+            }
+            return Ok(Some(listener));
+        }
+        if let Some(old) = self.server.take() {
+            old.stop_within(RESTART_STOP);
+        }
+        server::listen(&new.bind, new.port).map(Some).map_err(|e| {
+            let old = self.config.clone();
+            match server::start(self.app_state(&old), &old.bind, old.port) {
+                Ok(server) => {
+                    self.server = Some(server);
+                    e
+                }
+                Err(again) => format!("{e}; and serving as before failed: {again}"),
+            }
+        })
+    }
+
+    fn stop_maintenance(&mut self) {
+        if let Some((stop, thread)) = self.maintenance.take() {
+            let _ = stop.send(());
+            let _ = thread.join();
+        }
+    }
+
+    /// Maintenance (re)started with the settings and server as they are now.
+    fn start_maintenance(&mut self) -> Result<(), String> {
+        self.stop_maintenance();
+        self.maintenance = Some(maintenance(
+            self.host.clone(),
+            self.store.clone(),
+            self.db.clone(),
+            self.serving(),
+            self.ingest.dropped_counter(),
+            self.config.retention_days,
+            self.relay.as_ref().map(|r| r.status.clone()),
+            self.backfilling.clone(),
+        )?);
+        Ok(())
     }
 }
 
@@ -444,7 +628,18 @@ mod tests {
     }
 
     fn setup(dir: &Path, config: Config) -> Setup<Config, SystemConfig> {
-        let system: System<Config, NoConfig> = System { index: 0, short_name: "sys1".into(), kind: "p25".into(), config: None, settings: config.clone() };
+        let system: System<Config, NoConfig> = System {
+            index: 0,
+            short_name: "sys1".into(),
+            kind: "p25".into(),
+            name: String::new(),
+            fcc: Default::default(),
+            fcc_call_sign: String::new(),
+            fcc_name: String::new(),
+            sites: Vec::new(),
+            config: None,
+            settings: config.clone(),
+        };
         Setup {
             config,
             systems: vec![system],
@@ -471,6 +666,34 @@ mod tests {
         assert!(captured.output().logs().iter().any(|(_, m)| m.contains("backfill: 2 calls added from 2 files")));
         let mark = crate::store::systems::meta_get;
         assert_eq!(plugin.store.read(|c| mark(c, crate::backfill::COMPLETE_KEY)).unwrap().as_deref(), Some("1"));
+        plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn backfill_also_asks_the_recorders_call_store() {
+        let dir = testing::temp_dir("reporter-recall");
+        let (host, captured) = testing::capture();
+        let mut plugin = Reporter::start(host, setup(&dir, Config { port: 0, transcribe_url: String::new(), ..Config::default() })).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let request = loop {
+            let asked = captured.output().messages.iter().find_map(|m| match m {
+                trunk_recorder_plugin::PluginMessage::CallsQuery { request, .. } => Some(*request),
+                _ => None,
+            });
+            if let Some(r) = asked {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "the call store was not asked");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // A call whose JSON file the recorder didn't keep: only its store has it.
+        let record = trunk_recorder_plugin::CallRecord { short_name: "sys1".into(), talkgroup: 101, start_time: 1_700_000_000, ..Default::default() };
+        let call = trunk_recorder_plugin::StoredCall { path: "sys1/2023/11/14/101-1700000000_851012500".into(), record, audio: false, json: false };
+        plugin.calls(request, CallsPage { entries: vec![call], ..Default::default() });
+        while calls_stored(&plugin.store) == 0 {
+            assert!(Instant::now() < deadline, "the call was not stored");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         plugin.shutdown(Duration::from_secs(1));
     }
 
@@ -514,16 +737,123 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_follows_the_relay_once_per_change() {
-        // Bridge off: never.
-        assert_eq!(relay_change(None, None), None);
-        // The first tick reports, whatever the state.
-        assert_eq!(relay_change(Some(false), None), Some(false));
-        // Unchanged: nothing; changed: the new state.
-        assert_eq!(relay_change(Some(false), Some(false)), None);
-        assert_eq!(relay_change(Some(true), Some(false)), Some(true));
-        assert_eq!(relay_change(Some(true), Some(true)), None);
-        assert_eq!(relay_change(Some(false), Some(true)), Some(false));
+    fn the_status_line_is_set_first_then_once_per_relay_change() {
+        // The first tick sets it, bridge or not.
+        assert!(status_due(None, None));
+        assert!(status_due(Some(false), None));
+        // Bridge off, once set: never again.
+        assert!(!status_due(None, Some(None)));
+        // Unchanged: nothing; changed: again.
+        assert!(!status_due(Some(false), Some(Some(false))));
+        assert!(status_due(Some(true), Some(Some(false))));
+        assert!(!status_due(Some(true), Some(Some(true))));
+        assert!(status_due(Some(false), Some(Some(true))));
+    }
+
+    /// A port nothing listens on (as far as the OS knows just now).
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// The status of `GET path` on 127.0.0.1:`port` (`None`: nothing listens).
+    fn get(port: u16, path: &str) -> Option<u16> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").ok()?;
+        let mut head = String::new();
+        s.read_to_string(&mut head).ok()?;
+        head.get(9..12)?.parse().ok()
+    }
+
+    fn quiet(port: u16) -> Config {
+        Config { port, transcribe_url: String::new(), backfill: false, ..Config::default() }
+    }
+
+    #[test]
+    fn the_manifest_takes_settings_live() {
+        assert!(trunk_recorder_plugin::describe::<Reporter>().live_settings);
+    }
+
+    #[test]
+    fn new_settings_move_the_server_and_its_token_without_a_restart() {
+        let dir = testing::temp_dir("reporter-live");
+        let (a, b) = (free_port(), free_port());
+        let (host, captured) = testing::capture();
+        let mut plugin = Reporter::start(host, setup(&dir, quiet(a))).unwrap();
+        assert_eq!(get(a, "/api/v1/calls"), Some(200));
+        let started = plugin.started;
+
+        // Another port: served there, not here.
+        plugin.settings(setup(&dir, quiet(b))).unwrap();
+        assert_eq!((get(a, "/api/v1/calls"), get(b, "/api/v1/calls")), (None, Some(200)));
+        assert!(captured.output().logs().iter().any(|(_, m)| m.contains(&format!("serving tr-engine's API and pages at http://127.0.0.1:{b}/"))));
+
+        // A token, on the same port.
+        plugin.settings(setup(&dir, Config { token: Some("s3cret".into()), ..quiet(b) })).unwrap();
+        assert_eq!(get(b, "/api/v1/calls"), Some(401));
+
+        // Retention: the server is left as it is.
+        plugin.settings(setup(&dir, Config { token: Some("s3cret".into()), retention_days: 30, ..quiet(b) })).unwrap();
+        assert_eq!((plugin.config.retention_days, get(b, "/api/v1/calls")), (30, Some(401)));
+
+        // Port 0: stored, not served.
+        plugin.settings(setup(&dir, quiet(0))).unwrap();
+        assert_eq!(get(b, "/api/v1/calls"), None);
+        assert!(plugin.server.is_none());
+        assert_eq!(plugin.started, started);
+        plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn settings_that_cannot_be_served_leave_it_serving_as_before() {
+        let dir = testing::temp_dir("reporter-live-bad");
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = busy.local_addr().unwrap().port();
+        let a = free_port();
+        let (host, _captured) = testing::capture();
+        let mut plugin = Reporter::start(host, setup(&dir, quiet(a))).unwrap();
+
+        let err = plugin.settings(setup(&dir, quiet(taken))).unwrap_err();
+        assert!(err.contains(&format!("port {taken} is in use")), "{err}");
+        let err = plugin.settings(setup(&dir, Config { bind: "localhost".into(), ..quiet(a) })).unwrap_err();
+        assert!(err.contains("not an IP address"), "{err}");
+        assert_eq!(get(a, "/api/v1/calls"), Some(200));
+        assert_eq!(plugin.config, quiet(a));
+
+        // The same port, on an address it cannot have: served as before.
+        let err = plugin.settings(setup(&dir, Config { bind: "192.0.2.1".into(), ..quiet(a) })).unwrap_err();
+        assert!(err.contains("cannot listen on 192.0.2.1"), "{err}");
+        assert_eq!(get(a, "/api/v1/calls"), Some(200));
+        plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn new_settings_name_the_systems_again() {
+        let dir = testing::temp_dir("reporter-live-names");
+        let (host, _captured) = testing::capture();
+        let mut plugin = Reporter::start(host, setup(&dir, quiet(0))).unwrap();
+        let mut s = setup(&dir, quiet(0));
+        s.systems[0].name = "County".into();
+        plugin.settings(s).unwrap();
+        let name: String = plugin.store.read(|c| c.query_row("SELECT name FROM systems WHERE short_name = 'sys1'", [], |r| r.get(0))).unwrap();
+        assert_eq!(name, "County");
+        plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_settings_message_reaches_the_running_plugin() {
+        let dir = testing::temp_dir("reporter-live-msg");
+        let mut changed = testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false, "retentionDays": 7}));
+        changed.systems[0].name = "County".into();
+        let out = testing::run::<Reporter>([
+            HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false}))),
+            HostMessage::Settings(changed),
+        ]);
+        assert!(out.ready());
+        assert_eq!(out.status().map(|(s, _)| s), Some(State::Ok));
+        let store = Store::open(&dir.join("data/engine.sqlite")).unwrap();
+        let name: String = store.read(|c| c.query_row("SELECT name FROM systems WHERE short_name = 'sys1'", [], |r| r.get(0))).unwrap();
+        assert_eq!(name, "County");
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub struct ServerHandle {
     /// Where it listens (the real port when 0 was asked for).
     pub addr: SocketAddr,
     stop: oneshot::Sender<()>,
+    /// Ends the open connections a stop has waited on long enough.
+    kill: oneshot::Sender<()>,
     done: mpsc::Receiver<()>,
     thread: JoinHandle<()>,
     /// `serve` mode's transcripts relay, stopped with the server.
@@ -48,33 +50,56 @@ impl ServerHandle {
         self.stop_within(STOP_WAIT)
     }
 
-    /// As [`ServerHandle::stop`], waiting at most `wait`. A connection still
-    /// open then (an event stream) is left to the process's exit.
+    /// As [`ServerHandle::stop`], waiting at most `wait` for open connections;
+    /// those still open then (event streams, live audio) are closed.
     pub fn stop_within(self, wait: Duration) {
         if let Some((stop, _thread)) = &self.relay {
             // It ends at its next await; the thread is not waited for.
             let _ = stop.send(true);
         }
         let _ = self.stop.send(());
-        if self.done.recv_timeout(wait).is_ok() {
-            let _ = self.thread.join();
+        if self.done.recv_timeout(wait).is_err() {
+            let _ = self.kill.send(());
+            if self.done.recv_timeout(KILL_WAIT).is_err() {
+                return;
+            }
         }
+        let _ = self.thread.join();
     }
+}
+
+/// How long a stop waits for the server's thread once its connections are closed.
+const KILL_WAIT: Duration = Duration::from_millis(500);
+
+/// The bind address as an IP, or the error for the settings form.
+pub fn bind_ip(bind: &str) -> Result<IpAddr, String> {
+    bind.trim().parse().map_err(|_| format!("bind address {bind} is not an IP address: change Bind address in the plugin's settings"))
+}
+
+/// A socket bound to `bind:port`, or the error for the settings form (a taken port, say).
+pub fn listen(bind: &str, port: u16) -> Result<std::net::TcpListener, String> {
+    let ip = bind_ip(bind)?;
+    let listener = std::net::TcpListener::bind((ip, port)).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!("port {port} is in use: change Port in the plugin's settings"),
+        _ => format!("cannot listen on {ip}:{port} ({e}): change Bind address or Port in the plugin's settings"),
+    })?;
+    listener.set_nonblocking(true).map_err(|e| format!("cannot listen on {ip}:{port}: {e}"))?;
+    Ok(listener)
 }
 
 /// Listen on `bind:port` and serve `state` on a thread of its own. The socket
 /// is bound before this returns, so a taken port is an error here, worded for
 /// the settings form.
 pub fn start(state: AppState, bind: &str, port: u16) -> Result<ServerHandle, String> {
-    let ip: IpAddr = bind.trim().parse().map_err(|_| format!("bind address {bind} is not an IP address: change Bind address in the plugin's settings"))?;
-    let listener = std::net::TcpListener::bind((ip, port)).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AddrInUse => format!("port {port} is in use: change Port in the plugin's settings"),
-        _ => format!("cannot listen on {ip}:{port} ({e}): change Bind address or Port in the plugin's settings"),
-    })?;
-    listener.set_nonblocking(true).map_err(|e| format!("cannot listen on {ip}:{port}: {e}"))?;
+    serve_on(state, listen(bind, port)?)
+}
+
+/// Serve `state` on a socket [`listen`] bound, on a thread of its own.
+pub fn serve_on(state: AppState, listener: std::net::TcpListener) -> Result<ServerHandle, String> {
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| format!("cannot start the server: {e}"))?;
     let (stop, stopped) = oneshot::channel::<()>();
+    let (kill, killed) = oneshot::channel::<()>();
     let (done_tx, done) = mpsc::channel();
     let log = state.log.clone();
     let app = router(state);
@@ -82,24 +107,30 @@ pub fn start(state: AppState, bind: &str, port: u16) -> Result<ServerHandle, Str
         .name("http".into())
         .spawn(move || {
             runtime.block_on(async move {
-                let served = match tokio::net::TcpListener::from_std(listener) {
-                    Ok(l) => {
-                        axum::serve(l, app)
-                            .with_graceful_shutdown(async move {
-                                stopped.await.ok();
-                            })
-                            .await
+                let served = async move {
+                    match tokio::net::TcpListener::from_std(listener) {
+                        Ok(l) => {
+                            axum::serve(l, app)
+                                .with_graceful_shutdown(async move {
+                                    stopped.await.ok();
+                                })
+                                .await
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
                 };
-                if let Err(e) = served {
-                    log(format!("the HTTP server stopped: {e}"));
+                // Killed, the connections still open end with the runtime.
+                tokio::select! {
+                    served = served => if let Err(e) = served {
+                        log(format!("the HTTP server stopped: {e}"));
+                    },
+                    _ = killed => {}
                 }
             });
             let _ = done_tx.send(());
         })
         .map_err(|e| format!("cannot start the server: {e}"))?;
-    Ok(ServerHandle { addr, stop, done, thread, relay: None })
+    Ok(ServerHandle { addr, stop, kill, done, thread, relay: None })
 }
 
 /// `serve <data dir>`: the history a plugin run left in `data_dir`, served with
@@ -196,6 +227,10 @@ mod tests {
         let t = std::time::Instant::now();
         server.stop_within(Duration::from_millis(300));
         assert!(t.elapsed() < Duration::from_secs(2));
+        // And the stream is closed, not left to a server nobody stops.
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut rest = Vec::new();
+        assert!(s.read_to_end(&mut rest).is_ok(), "the stream was closed");
     }
 
     #[test]

@@ -13,7 +13,9 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
-trunk-recorder-plugin = "0.5"
+# Plugin SDK 0.9.0 (what Trunk Recorder Pro 0.3.0 speaks), from the recorder's
+# repository until it is published on crates.io.
+trunk-recorder-plugin = { git = "https://github.com/TrunkRecorder/trunk-recorder-pro", tag = "v0.3.0" }
 rusqlite = { version = "0.41", features = ["bundled"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }

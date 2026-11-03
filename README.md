@@ -32,6 +32,14 @@ first starts, so it opens the history you have. The CHANGELOG has the steps.
 | Allowed origins | none | Web pages served from these origins may call the API. One origin per line, such as `http://192.168.1.20:8081`. |
 | Transcribe plugin URL | `http://127.0.0.1:8767` | Where the transcribe plugin's local API is. Empty turns transcripts off. See Transcripts. |
 
+From Trunk Recorder Pro 0.3.0, a change takes effect without restarting the
+plugin, except "Backfill from recorded calls on start", which waits for the
+next start. A settings change that moves the server, or changes its token or
+origins, closes open event streams and live audio, and clients reconnect. If
+the new port is taken or the bind address is not an IP address, the change is
+refused and the plugin keeps serving as before. Older recorders restart the
+plugin instead.
+
 ## What you get
 
 - The API at `http://127.0.0.1:8092/api/v1/`, following tr-engine's
@@ -107,6 +115,12 @@ recorded there, so the history begins with what you have. If it is interrupted
 it resumes where it stopped on the next start. Turn "Backfill from recorded
 calls on start" off to start with an empty history.
 
+From Trunk Recorder Pro 0.3.0, it also asks the recorder's call store for the
+calls it indexes, newest first. This finds calls whose JSON file is not kept
+(the call log turned off), which the folder walk cannot see. Calls without a
+kept audio file are stored without audio. Once it has reached the oldest call,
+later starts fetch only the calls added since.
+
 ## Not built yet
 
 Transcript search and review, talkgroup directory import, trunking messages, call groups, the
@@ -122,9 +136,16 @@ Three small additions to TRP would make Reporter a better fit (design spec C11):
 2. A keep-running-while-idle flag, so the plugin stays up between recordings
    and still receives `hello` when recording starts.
 3. Talkgroup and unit file paths in `hello`, so names can be loaded without
-   asking the user for them.
+   asking the user for them. From 0.3.0, calls and unit events carry the
+   names of the radios and talkgroups they involve, so only the ones never
+   heard are missing.
 
-The SDK 0.5 is what Reporter targets today.
+Reporter is built on plugin SDK 0.9.0, the one Trunk Recorder Pro 0.3.0 ships, taken
+from the recorder's repository (tag `v0.3.0`) until it is on crates.io. It speaks
+plugin API 1, as the 0.2 releases do, so they run it too (checked on 0.2.11).
+They run it without 0.3.0's additions: settings taken while running, the call
+store backfill, system names and sites from `hello`, and unit and talkgroup
+names from unit events.
 
 ## Spec change for tr-engine
 
