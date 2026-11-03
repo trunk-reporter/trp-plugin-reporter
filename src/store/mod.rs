@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 const SCHEMA: &str = include_str!("schema.sql");
 /// Run on every open (see the file).
@@ -132,13 +132,18 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Bring the store to [`SCHEMA_VERSION`], one version at a time, then apply
 /// `ensure.sql`. A store from a newer trunk-reporter is refused, not touched.
+///
+/// The write lock is taken first (IMMEDIATE), so a store another connection is
+/// writing waits out the busy timeout. A deferred transaction would begin as a
+/// read, and its first write would fail at once with "database is locked" if
+/// another connection had written meanwhile.
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
-    let has: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')", [], |r| r.get(0))?;
-    let found: i64 = if has { conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))? } else { 0 };
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let has: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')", [], |r| r.get(0))?;
+    let found: i64 = if has { tx.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))? } else { 0 };
     if found > SCHEMA_VERSION {
         return Err(StoreError(format!("this store was written by a newer trunk-reporter (schema {found}); upgrade trunk-reporter")));
     }
-    let tx = conn.unchecked_transaction()?;
     let mut version = found;
     while version < SCHEMA_VERSION {
         match version {
