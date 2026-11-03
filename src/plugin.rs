@@ -391,7 +391,7 @@ mod tests {
     fn the_plugin_starts_stores_and_answers() {
         let dir = testing::temp_dir("reporter");
         let out = testing::run::<Reporter>([
-            HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0}))),
+            HostMessage::Hello(testing::hello(&dir, json!({"transcribeUrl": "", "port": 0, "backfill": false}))),
             HostMessage::CallConcluded(testing::call(&dir, "sys1", 101)),
         ]);
         assert!(out.ready());
