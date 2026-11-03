@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::sync::watch;
 use trunk_recorder_plugin::{
-    AudioChunk, CallInfo, CallsPage, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, UnitEvent, topic,
+    AudioChunk, CallInfo, CallsPage, ConcludedCall, Host, HostMessage, Manifest, Metrics, Plugin, Setup, State, Status, TonePatternEvent, UnitEvent, topic,
 };
 
 use crate::affiliations::Affiliations;
@@ -242,6 +242,7 @@ impl Plugin for Reporter {
                 topic::UNIT.into(),
                 topic::STATUS.into(),
                 topic::AUDIO.into(),
+                topic::TONE_PATTERN.into(),
             ],
             // `--describe` has no settings, so this is the default port's URL;
             // a changed port is only in the log and status line.
@@ -439,6 +440,10 @@ impl Plugin for Reporter {
         self.audio.publish(AudioFrame { system_id: system_id.0, tgid: chunk.talkgroup, sample_rate, pcm });
     }
 
+    fn tone_pattern(&mut self, t: TonePatternEvent) {
+        self.ingest.handle(HostMessage::TonePattern(t));
+    }
+
     /// A page of the recorder's calls, for the backfill that asked.
     fn calls(&mut self, request: u64, page: CallsPage) {
         if let Some(recall) = &self.recall {
@@ -567,7 +572,7 @@ mod tests {
     fn the_manifest_subscribes_to_what_the_plugin_needs() {
         let m = trunk_recorder_plugin::describe::<Reporter>();
         assert_eq!((m.id.as_str(), m.name.as_str()), ("trunk-reporter", "Trunk Reporter"));
-        assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && m.subscribes("audio"));
+        assert!(m.subscribes("call.concluded") && m.subscribes("unit") && m.subscribes("status") && m.subscribes("audio") && m.subscribes("tone_pattern"));
         assert!(m.config.is_some() && m.system_config.is_none());
     }
 

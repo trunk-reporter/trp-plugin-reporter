@@ -1884,6 +1884,69 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /tone-patterns:
+    get:
+      operationId: listTonePatterns
+      summary: List tone patterns (Reporter's own)
+      description: |
+        The tone patterns calls carried: two-tone pages, long and hi-low
+        alert tones, pulsed tones, DTMF and KNOX digit strings, Morse IDs
+        and tone sequences, as Trunk Recorder Pro 0.3.0 finds them. They
+        come from each call's record (`tone_patterns`), so a call that was
+        not recorded has none. Newest first by default. Not in tr-engine:
+        Trunk Reporter's addition.
+      tags: [calls]
+      parameters:
+        - name: system_id
+          in: query
+          description: Filter by internal system ID (comma-separated). Alias "systems"; or `sysid` (hex).
+          schema:
+            type: string
+        - name: tgid
+          in: query
+          description: Filter by talkgroup (comma-separated). Alias "tgids".
+          schema:
+            type: string
+        - name: unit_id
+          in: query
+          description: Filter by the radio talking when the pattern began (comma-separated). Aliases "units", "unit_ids".
+          schema:
+            type: string
+        - name: call_id
+          in: query
+          description: Filter by call (comma-separated). Alias "call_ids".
+          schema:
+            type: string
+        - name: pattern
+          in: query
+          description: |
+            Comma-separated pattern kinds: `two_tone`, `long`, `hi_low`,
+            `pulsed`, `digits`, `morse`, `sequence`, `beep`. Alias "patterns".
+          schema:
+            type: string
+            example: two_tone,digits
+        - $ref: "#/components/parameters/startTime"
+        - $ref: "#/components/parameters/endTime"
+        - name: sort
+          in: query
+          description: "`time` (oldest first) or `-time` (newest first, the default)."
+          schema:
+            type: string
+            default: "-time"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: Tone patterns
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TonePatternListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ----------------------------------------------------------
   # Calls
   # ----------------------------------------------------------
@@ -3383,6 +3446,7 @@ paths:
         | `trunking_message` | P25 control channel message | TrunkingMessage object |
         | `console` | TR console log message | ConsoleMessage object |
         | `transcription` | A call's transcript landed (from the transcribe plugin) | `{ call_id, system_id, tgid, text, start_time }` |
+        | `tone_pattern` | A call's tones made a pattern (a page, an alert tone, digits, a Morse ID); subtype: the pattern, as in `tone_pattern:two_tone` | TonePattern object |
 
       tags: [events]
       parameters:
@@ -3424,7 +3488,7 @@ paths:
             Comma-separated event types to subscribe to. Omit for all
             event types. Valid values: `call_start`, `call_update`,
             `call_end`, `unit_event`, `recorder_update`, `rate_update`,
-            `trunking_message`, `console`, `transcription`.
+            `trunking_message`, `console`, `transcription`, `tone_pattern`.
 
             Supports compound syntax with `:` to filter on event
             subtypes. For example, `unit_event:call` matches only unit
@@ -6630,6 +6694,98 @@ components:
           type: integer
           example: 0
 
+    TonePattern:
+      type: object
+      required: [call_id, system_id, system_name, tgid, time, pattern, tones, lengths, pos, len, src, origin, text]
+      additionalProperties: true
+      description: |
+        A pattern a call's tones made (Trunk Reporter's addition, from Trunk
+        Recorder Pro 0.3.0): the call record's `tone_patterns` entry, with
+        the call, system, talkgroup and radio beside it. Also the payload of
+        the `tone_pattern` SSE event, where `id` is absent and `call_id` is
+        null for a call not stored yet.
+      properties:
+        id:
+          type: integer
+          description: Its row (absent in SSE payloads).
+        call_id:
+          type: integer
+          nullable: true
+        system_id:
+          type: integer
+        system_name:
+          type: string
+        tgid:
+          type: integer
+        tg_alpha_tag:
+          type: string
+        unit_id:
+          type: integer
+          description: The radio talking when it began (absent when not known).
+        unit_alpha_tag:
+          type: string
+        time:
+          type: string
+          format: date-time
+          description: When it began (the call's start plus `pos`; live, when it was told).
+        pattern:
+          type: string
+          enum: [two_tone, long, hi_low, pulsed, digits, morse, sequence, beep]
+        tones:
+          type: array
+          items:
+            type: number
+          description: Its tones, Hz (two-tone A then B; hi-low lower first; a sequence in turn).
+        lengths:
+          type: array
+          items:
+            type: number
+          description: Seconds (two-tone A and B; hi-low each tone's; pulsed on then off; Morse its dot).
+        digits:
+          type: string
+          description: Digits, the string; Morse, the text.
+        knox:
+          type: boolean
+        cycles:
+          type: integer
+        format:
+          type: string
+          description: A two-tone page's format by its timing (`Quick Call II`, …).
+        pos:
+          type: number
+          description: Seconds into the call's audio.
+        len:
+          type: number
+        src:
+          type: integer
+          description: The radio talking when it began (0 when not known).
+        origin:
+          type: string
+          enum: [frame, audio]
+        text:
+          type: string
+          example: two-tone 849.63 → 1292.85 Hz, 1 + 3.04 s (Quick Call II)
+        signals:
+          type: array
+          items:
+            type: string
+          description: The system's signals it is (their ids).
+
+    TonePatternListResponse:
+      type: object
+      required: [tone_patterns, total, limit, offset]
+      properties:
+        tone_patterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/TonePattern"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
     Affiliation:
       type: object
       required: [system_id, unit_id, tgid, affiliated_since, last_event_time, status]
@@ -7321,6 +7477,7 @@ components:
         - trunking_message
         - console
         - transcription
+        - tone_pattern
       description: |
         SSE event types pushed to clients:
         - **call_start**: new call recording began
@@ -7333,6 +7490,7 @@ components:
         - **console**: trunk-recorder console log message
         - **transcription**: a call's transcript arrived, with
           `{ call_id, system_id, tgid, text, start_time }`
+        - **tone_pattern**: a call's tones made a pattern (TonePattern object)
 
     SSEEvent:
       type: object
@@ -7363,6 +7521,7 @@ components:
         - `rate_update`: DecodeRate object
         - `trunking_message`: TrunkingMessage object
         - `console`: ConsoleMessage object
+        - `tone_pattern`: TonePattern object
 
         Server-side filtering metadata (system_id, site_id, tgid, unit_id)
         is used internally to match events against query params but is not

@@ -7,6 +7,7 @@ pub mod recorder;
 pub mod stats;
 pub mod systems;
 pub mod talkgroups;
+pub mod tones;
 pub mod units;
 
 use rusqlite::ToSql;
@@ -159,6 +160,7 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         tx.execute("INSERT INTO schema_version VALUES (?1)", [version])?;
     }
     tx.execute_batch(ENSURE)?;
+    tones::index_stored(&tx)?;
     tx.commit()?;
     Ok(())
 }

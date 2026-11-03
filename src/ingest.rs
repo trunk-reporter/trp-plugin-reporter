@@ -14,9 +14,10 @@ use std::sync::{Arc, OnceLock};
 
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
-use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, UnitEvent};
+use trunk_recorder_plugin::{CallInfo, CallRecord, ConcludedCall, Host, HostMessage, NoConfig, Outcome, Status, System, TonePatternEvent, UnitEvent};
 
 use crate::affiliations::{Affiliations, Names};
+use crate::api::tones::{ToneContext, tone_value};
 use crate::api::types::{Call as ApiCall, DecodeRate, Recorder, UnitEvent as ApiUnitEvent};
 use crate::bus::{Bus, EventKind, NewEvent};
 use crate::config::Config;
@@ -404,6 +405,7 @@ impl Ingest {
             HostMessage::CallConcluded(call) => self.call_concluded(call),
             HostMessage::Unit(event) => self.unit(event),
             HostMessage::Status(status) => self.status(status),
+            HostMessage::TonePattern(t) => self.tone_pattern(t),
             HostMessage::Shutdown(_) => self.store.flush(),
             // (Hello, audio, and what the plugin doesn't subscribe to or ask for.)
             _ => {}
@@ -579,6 +581,44 @@ impl Ingest {
         });
     }
 
+    /// Published as it is heard, not stored: the call's record brings the
+    /// same pattern to the store once it is saved (an unrecorded call's never does).
+    fn tone_pattern(&mut self, t: TonePatternEvent) {
+        let Some(system_id) = self.system(None, &t.short_name) else { return };
+        let site_id = self.site(system_id, site_name(&t.site, &t.short_name));
+        let call = self.live.iter().find(|((_, id), l)| u64::from(*id) == t.call_num && l.system_id == system_id).map(|(_, l)| l.id.clone());
+        self.commit(move |c, after| {
+            let system_name: String =
+                c.query_row("SELECT CASE WHEN name = '' THEN short_name ELSE name END FROM systems WHERE id = ?1", [system_id], |r| r.get(0))?;
+            // (Through text: the pattern's numbers are written as raw JSON.)
+            let pattern: serde_json::Map<String, Value> =
+                serde_json::to_string(&t.pattern).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let unit = u32::try_from(t.pattern.src).ok().filter(|u| *u != 0);
+            let cx = ToneContext {
+                id: None,
+                call_id: call.and_then(|cell| cell.get().map(|id| id.0)),
+                system_id: system_id.0,
+                system_name,
+                tgid: t.talkgroup,
+                tg_alpha_tag: t.alpha_tag,
+                unit_id: unit,
+                unit_alpha_tag: t.src_tag,
+                time_ms: (t.time * 1000.0) as i64,
+            };
+            after.events.push(NewEvent {
+                kind: EventKind::TonePattern,
+                sub_type: Some(t.pattern.pattern.clone()),
+                system_id: Some(system_id.0),
+                site_id: site_id.map(|s| s.0),
+                tgid: Some(t.talkgroup),
+                unit_id: unit,
+                emergency: false,
+                data: tone_value(&pattern, &cx).to_string(),
+            });
+            Ok(())
+        });
+    }
+
     fn status(&mut self, status: Status) {
         let time_ms = (status.time * 1000.0) as i64;
         for s in status.systems {
@@ -630,7 +670,7 @@ mod tests {
     use crate::store::systems::system_by_short_name;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
-    use trunk_recorder_plugin::{CallSource, Outcome, SiteInfo, SrcEntry, Status, SystemStatus, UnitEvent, testing};
+    use trunk_recorder_plugin::{CallSource, Outcome, SiteInfo, SrcEntry, Status, SystemStatus, TonePattern, TonePatternEvent, UnitEvent, testing};
 
     const T0: i64 = 1_700_000_101;
 
@@ -967,6 +1007,40 @@ mod tests {
         r.ingest.handle(HostMessage::Unit(UnitEvent { talkgroup: Some(999), ..event(11, "", "Unheard") }));
         r.events();
         assert_eq!(r.count("SELECT count(*) FROM talkgroups WHERE tgid = 999"), 0);
+    }
+
+    #[test]
+    fn a_tone_pattern_is_published_live_and_stored_with_its_call() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[(10, T0)], true)));
+        r.events();
+        let page = TonePattern { pattern: "two_tone".into(), tones: vec![849.6, 1292.8], pos: 0.5, src: 10, text: "two-tone".into(), ..Default::default() };
+        let event = TonePatternEvent {
+            short_name: "sys1".into(),
+            call_num: 7,
+            talkgroup: 101,
+            alpha_tag: "Fire Dispatch".into(),
+            src_tag: "Engine 5".into(),
+            time: T0 as f64 + 0.5,
+            pattern: page.clone(),
+            ..Default::default()
+        };
+        r.ingest.handle(HostMessage::TonePattern(event));
+        let events = r.events();
+        assert_eq!(kinds(&events), vec![("tone_pattern", Some("two_tone".into()))]);
+        assert_eq!((events[0].tgid, events[0].unit_id), (Some(101), Some(10)));
+        let data: Value = serde_json::from_str(&events[0].data).unwrap();
+        let call_id: i64 = r.store.read(|c| c.query_row("SELECT id FROM calls", [], |r| r.get(0))).unwrap();
+        assert_eq!((data["call_id"].as_i64(), data["tones"][1].as_f64(), data["pattern"].as_str()), (Some(call_id), Some(1292.8), Some("two_tone")));
+        assert_eq!((data["tg_alpha_tag"].as_str(), data["unit_alpha_tag"].as_str()), (Some("Fire Dispatch"), Some("Engine 5")));
+        // Told live only: the store has it once the call's record does.
+        assert_eq!(r.count("SELECT count(*) FROM tone_patterns"), 0);
+        let mut cc = testing::call(&r.dir, "sys1", 101);
+        cc.call.call_num = 7;
+        cc.call.tone_patterns = vec![page];
+        r.ingest.handle(HostMessage::CallConcluded(cc));
+        r.events();
+        assert_eq!(r.count(&format!("SELECT count(*) FROM tone_patterns WHERE call_id = {call_id}")), 1);
     }
 
     #[test]

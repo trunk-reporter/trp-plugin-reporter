@@ -21,6 +21,8 @@ pub enum EventKind {
     RateUpdate,
     /// A call's transcript arrived from the transcribe plugin.
     Transcription,
+    /// A call's tones made a pattern (a page, an alert tone, digits, a Morse ID).
+    TonePattern,
 }
 
 impl EventKind {
@@ -33,6 +35,7 @@ impl EventKind {
             EventKind::RecorderUpdate => "recorder_update",
             EventKind::RateUpdate => "rate_update",
             EventKind::Transcription => "transcription",
+            EventKind::TonePattern => "tone_pattern",
         }
     }
 }
