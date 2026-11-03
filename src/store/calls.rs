@@ -155,6 +155,69 @@ pub struct Concluded {
     pub known: bool,
 }
 
+/// The fields of a call's record that SDK 0.5 knew: the columns, and what this
+/// store never kept. Everything else is `metadata_json`, as it was when 0.5 left
+/// it in `CallRecord::extra` (SDK 0.9 knows `nac`, `transmission_id`, `tones`, …).
+const RECORD_FIELDS: &[&str] = &[
+    "call_num",
+    "freq",
+    "freq_error",
+    "signal",
+    "noise",
+    "snr",
+    "clean_voice_pct",
+    "source_num",
+    "recorder_num",
+    "tdma_slot",
+    "phase2_tdma",
+    "start_time",
+    "stop_time",
+    "start_time_ms",
+    "stop_time_ms",
+    "emergency",
+    "priority",
+    "mode",
+    "duplex",
+    "encrypted",
+    "algid",
+    "key_id",
+    "decrypted",
+    "call_length",
+    "call_length_ms",
+    "talkgroup",
+    "talkgroup_tag",
+    "talkgroup_description",
+    "talkgroup_group_tag",
+    "talkgroup_group",
+    "color_code",
+    "ran",
+    "tone_mode",
+    "tone_detected",
+    "tone_confidence",
+    "audio_type",
+    "short_name",
+    "site",
+    "patched_talkgroups",
+    "freqList",
+    "errorList",
+    "srcList",
+];
+
+/// What of `record` has no column: its unknown fields, and those the SDK knows
+/// that aren't [`RECORD_FIELDS`] (left out when empty). None: nothing.
+fn metadata_json(record: &CallRecord) -> Option<String> {
+    let mut m = record.extra.clone();
+    // (Through text: the record's numbers are written as raw JSON.)
+    let all: serde_json::Map<String, serde_json::Value> = serde_json::to_string(record).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    for (k, v) in all {
+        let empty = v.is_null() || v.as_str() == Some("");
+        if !empty && !RECORD_FIELDS.contains(&k.as_str()) && !m.contains_key(&k) {
+            m.insert(k, v);
+        }
+    }
+    (!m.is_empty()).then(|| serde_json::to_string(&m).unwrap_or_default())
+}
+
 /// The call's files are on disk. Updates `existing`, else a start-only row of
 /// the same call, else inserts (or, for a path seen before, updates that row).
 /// A different row holding the path is deleted.
@@ -173,7 +236,7 @@ pub fn call_concluded(
     let end_ms = if record.stop_time_ms != 0 { record.stop_time_ms } else { record.stop_time * 1000 };
     let length_ms = if record.call_length_ms != 0 { record.call_length_ms } else { (record.call_length * 1000.0) as i64 };
     let analog = record.audio_type == "analog";
-    let metadata = (!record.extra.is_empty()).then(|| serde_json::to_string(&record.extra).unwrap_or_default());
+    let metadata = metadata_json(record);
     let slot = (record.tdma_slot >= 0).then_some(record.tdma_slot);
     let opt = |v: i64| (v >= 0).then_some(v);
     let existing = match existing {
@@ -567,6 +630,24 @@ mod tests {
 
     fn record(tg: u32) -> CallRecord {
         call(&temp_dir("calls"), "sys1", tg).call
+    }
+
+    #[test]
+    fn metadata_keeps_what_has_no_column() {
+        assert_eq!(metadata_json(&CallRecord::default()), None, "nothing set, nothing kept");
+        let mut rec = record(101);
+        rec.nac = "3a1".into();
+        rec.transmission_id = "tx-1".into();
+        rec.talkgroup_ota = Some(101);
+        rec.tones = vec![trunk_recorder_plugin::ToneEntry { kind: "ctcss".into(), value: "103.5".into(), len: 2.5, ..Default::default() }];
+        rec.extra.insert("from_a_newer_recorder".into(), serde_json::json!(true));
+        let m: serde_json::Value = serde_json::from_str(&metadata_json(&rec).expect("kept")).unwrap();
+        assert_eq!((m["nac"].as_str(), m["transmission_id"].as_str(), m["talkgroup_ota"].as_u64()), (Some("3a1"), Some("tx-1"), Some(101)));
+        assert_eq!((m["tones"][0]["value"].as_str(), m["tones"][0]["len"].as_f64()), (Some("103.5"), Some(2.5)));
+        assert_eq!(m["from_a_newer_recorder"], true);
+        for column in ["talkgroup", "freq", "start_time", "srcList", "freqList", "short_name"] {
+            assert!(m.get(column).is_none(), "{column} has a column: {m}");
+        }
     }
 
     #[test]

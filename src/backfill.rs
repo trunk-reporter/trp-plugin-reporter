@@ -140,8 +140,18 @@ mod tests {
         let store = Store::in_memory();
         let dir = testing::temp_dir(tag);
         let (host, captured) = testing::capture();
-        let systems: Vec<System<Config, NoConfig>> =
-            vec![System { index: 0, short_name: "sys1".into(), kind: "p25".into(), config: None, settings: Config::default() }];
+        let systems: Vec<System<Config, NoConfig>> = vec![System {
+            index: 0,
+            short_name: "sys1".into(),
+            kind: "p25".into(),
+            name: String::new(),
+            fcc: Default::default(),
+            fcc_call_sign: String::new(),
+            fcc_name: String::new(),
+            sites: Vec::new(),
+            config: None,
+            settings: Config::default(),
+        }];
         let ingest = Ingest::new(store.clone(), Bus::new(100), Affiliations::new(), Some(host), &systems).unwrap().with_capture_dir(dir.clone());
         (ingest, store, dir, captured)
     }

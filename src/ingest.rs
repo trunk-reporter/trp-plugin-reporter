@@ -215,16 +215,8 @@ struct Conclusion {
 }
 
 impl Ingest {
-    /// Ensure a `systems` row for each of the recorder's systems.
+    /// Ensure a `systems` row for each of the recorder's systems ([`Ingest::declare`]).
     pub fn new(store: Store, bus: Bus, affiliations: Affiliations, host: Option<Host>, systems: &[System<Config, NoConfig>]) -> Result<Ingest, StoreError> {
-        let declared: Vec<(u16, String, String)> = systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone())).collect();
-        let now = now_ms();
-        let ids = store.write_sync(move |c| {
-            declared
-                .into_iter()
-                .map(|(index, short_name, kind)| Ok((index, ensure_system(c, &short_name, &kind, "", now)?, short_name)))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })?;
         let mut ingest = Ingest {
             store,
             bus,
@@ -239,11 +231,35 @@ impl Ingest {
             dropped: Arc::new(AtomicU64::new(0)),
             first_sights: 0,
         };
-        for (index, id, short_name) in ids {
-            ingest.by_index.insert(index, id);
-            ingest.by_name.insert(short_name, id);
-        }
+        ingest.declare(systems)?;
         Ok(ingest)
+    }
+
+    /// Ensure a row for each of the recorder's systems, with its name, and for
+    /// each of its sites (waiting on the store): they are listed before they
+    /// are heard, and their events never wait on the store.
+    pub fn declare(&mut self, systems: &[System<Config, NoConfig>]) -> Result<(), StoreError> {
+        let declared: Vec<(u16, String, String, String, Vec<String>)> =
+            systems.iter().map(|s| (s.index, s.short_name.clone(), s.kind.clone(), s.name.clone(), s.sites.iter().map(|x| x.name.clone()).collect())).collect();
+        let now = now_ms();
+        let ids = self.store.write_sync(move |c| {
+            declared
+                .into_iter()
+                .map(|(index, short_name, kind, name, sites)| {
+                    let id = ensure_system(c, &short_name, &kind, &name, now)?;
+                    let sites =
+                        sites.into_iter().filter(|n| !n.is_empty()).map(|n| Ok((ensure_site(c, id, &n, now)?, n))).collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok((index, id, short_name, sites))
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        self.by_index.clear();
+        for (index, id, short_name, sites) in ids {
+            self.by_index.insert(index, id);
+            self.by_name.insert(short_name, id);
+            self.sites.extend(sites.into_iter().map(|(site, name)| ((id, name), site)));
+        }
+        Ok(())
     }
 
     /// Fill the system and site caches from the store, so a system or site
@@ -389,7 +405,8 @@ impl Ingest {
             HostMessage::Unit(event) => self.unit(event),
             HostMessage::Status(status) => self.status(status),
             HostMessage::Shutdown(_) => self.store.flush(),
-            HostMessage::Hello(_) | HostMessage::Audio(_) | HostMessage::Unknown => {}
+            // (Hello, audio, and what the plugin doesn't subscribe to or ask for.)
+            _ => {}
         }
     }
 
@@ -407,8 +424,8 @@ impl Ingest {
             after.call = Some((cell, id));
             touch_talkgroup(c, system_id, info.talkgroup, &TgTags::from_info(&info), new.start_ms, info.encrypted, info.algid)?;
             let sources = sources_of(&info);
-            for &(unit, time_ms, _) in &sources {
-                touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
+            for s in &info.sources {
+                touch_unit(c, system_id, s.unit, &s.tag, "", (s.time * 1000.0) as i64, Some(("call", Some(info.talkgroup))))?;
             }
             after.events.extend(call_event(c, id, EventKind::CallStart)?);
             let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, None);
@@ -436,8 +453,8 @@ impl Ingest {
             let Some(&id) = cell.get() else { return Ok(()) };
             call_ended(c, id, end_ms, &info)?;
             let sources = sources_of(&info);
-            for &(unit, time_ms, _) in sources.iter().filter(|s| tell.contains(&s.0)) {
-                touch_unit(c, system_id, unit, "", "", time_ms, Some(("call", Some(info.talkgroup))))?;
+            for s in info.sources.iter().filter(|s| tell.contains(&s.unit)) {
+                touch_unit(c, system_id, s.unit, &s.tag, "", (s.time * 1000.0) as i64, Some(("call", Some(info.talkgroup))))?;
             }
             after.events.extend(call_event(c, id, EventKind::CallUpdate)?);
             let events = transmission_events(id, system_id, Some(site_id), info.talkgroup, &sources, ended);
@@ -546,8 +563,13 @@ impl Ingest {
             call_id: None,
             metadata_json: metadata,
         };
+        let (unit_tag, tg_tags) = (event.tag, TgTags { alpha_tag: event.alpha_tag, ..Default::default() });
         self.commit(move |c, after| {
-            touch_unit(c, e.system_id, e.unit, "", "", e.time_ms, Some((e.event_type, e.tgid)))?;
+            // The names the recorder knows (its units and talkgroup files, a talker alias), as a call's files carry them.
+            touch_unit(c, e.system_id, e.unit, &unit_tag, "", e.time_ms, Some((e.event_type, e.tgid)))?;
+            if let Some(tg) = e.tgid.filter(|_| !tg_tags.alpha_tag.is_empty()) {
+                tag_talkgroup(c, e.system_id, tg, &tg_tags)?;
+            }
             if let Some(id) = insert_unit_event(c, &e)? {
                 after.affiliate(c, &e);
                 let event = unit_event(c, id, &e, &after.instance)?;
@@ -608,12 +630,23 @@ mod tests {
     use crate::store::systems::system_by_short_name;
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
-    use trunk_recorder_plugin::{CallSource, Outcome, SrcEntry, Status, SystemStatus, UnitEvent, testing};
+    use trunk_recorder_plugin::{CallSource, Outcome, SiteInfo, SrcEntry, Status, SystemStatus, UnitEvent, testing};
 
     const T0: i64 = 1_700_000_101;
 
     fn systems() -> Vec<System<Config, NoConfig>> {
-        vec![System { index: 0, short_name: "sys1".into(), kind: "p25".into(), config: None, settings: Config::default() }]
+        vec![System {
+            index: 0,
+            short_name: "sys1".into(),
+            kind: "p25".into(),
+            name: String::new(),
+            fcc: Default::default(),
+            fcc_call_sign: String::new(),
+            fcc_name: String::new(),
+            sites: Vec::new(),
+            config: None,
+            settings: Config::default(),
+        }]
     }
 
     struct Rig {
@@ -903,6 +936,67 @@ mod tests {
         assert_eq!(data["time"].as_str().map(|t| OffsetDateTime::parse(t, &Rfc3339).unwrap().unix_timestamp()), Some(T0));
         assert_eq!((data["tgid"].as_u64(), data["instance_id"].as_str()), (Some(101), Some("rig-host")));
         assert_eq!(r.ingest.dropped(), 1);
+    }
+
+    #[test]
+    fn unit_events_carry_the_unit_and_talkgroup_names() {
+        let mut r = rig();
+        r.ingest.handle(HostMessage::CallStart(info(7, &[], true)));
+        let event = |unit, tag: &str, alpha: &str| UnitEvent {
+            system: 0,
+            short_name: "sys1".into(),
+            kind: "affiliation".into(),
+            unit,
+            tag: tag.into(),
+            talkgroup: Some(101),
+            alpha_tag: alpha.into(),
+            time: T0 as f64,
+            ..Default::default()
+        };
+        r.ingest.handle(HostMessage::Unit(event(10, "Engine 5", "Fire Dispatch")));
+        // An event without names leaves them be.
+        r.ingest.handle(HostMessage::Unit(event(10, "", "")));
+        let events = r.events();
+        let name: String = r.store.read(|c| c.query_row("SELECT alpha_tag FROM units WHERE unit_id = 10", [], |r| r.get(0))).unwrap();
+        let tg: String = r.store.read(|c| c.query_row("SELECT alpha_tag FROM talkgroups WHERE tgid = 101", [], |r| r.get(0))).unwrap();
+        assert_eq!((name.as_str(), tg.as_str()), ("Engine 5", "Fire Dispatch"));
+        let joins: Vec<&Event> = events.iter().filter(|e| e.kind == EventKind::UnitEvent).collect();
+        let data: Value = serde_json::from_str(&joins[0].data).unwrap();
+        assert_eq!((data["unit_alpha_tag"].as_str(), data["tg_alpha_tag"].as_str()), (Some("Engine 5"), Some("Fire Dispatch")));
+        // A talkgroup no call was heard on is not made by an affiliation.
+        r.ingest.handle(HostMessage::Unit(UnitEvent { talkgroup: Some(999), ..event(11, "", "Unheard") }));
+        r.events();
+        assert_eq!(r.count("SELECT count(*) FROM talkgroups WHERE tgid = 999"), 0);
+    }
+
+    #[test]
+    fn a_call_starts_with_its_radios_names() {
+        let mut r = rig();
+        let mut call = info(7, &[(10, T0)], true);
+        call.sources[0].tag = "Medic 2".into();
+        r.ingest.handle(HostMessage::CallStart(call));
+        r.events();
+        let name: String = r.store.read(|c| c.query_row("SELECT alpha_tag FROM units WHERE unit_id = 10", [], |r| r.get(0))).unwrap();
+        assert_eq!(name, "Medic 2");
+    }
+
+    #[test]
+    fn the_hello_names_systems_and_lists_their_sites() {
+        let mut sys = systems();
+        sys[0].name = "County Public Safety".into();
+        sys[0].sites = vec![SiteInfo { name: "east".into() }, SiteInfo { name: "west".into() }];
+        let store = Store::in_memory();
+        let mut ingest = Ingest::new(store.clone(), Bus::new(10), Affiliations::new(), None, &sys).unwrap();
+        let row = store.read(|c| system_by_short_name(c, "sys1")).unwrap().unwrap();
+        assert_eq!(row.name, "County Public Safety");
+        let sites: Vec<String> = store.read(|c| c.prepare("SELECT name FROM sites ORDER BY name")?.query_map([], |r| r.get(0))?.collect()).unwrap();
+        assert_eq!(sites, ["east", "west"]);
+        // Their events need no waiting on the store.
+        ingest.handle(status_of("west"));
+        assert_eq!(ingest.first_sights(), 0);
+        // A hello without the name (an older recorder's) keeps it.
+        Ingest::new(store.clone(), Bus::new(10), Affiliations::new(), None, &systems()).unwrap();
+        assert_eq!(store.read(|c| system_by_short_name(c, "sys1")).unwrap().unwrap().name, "County Public Safety");
     }
 
     fn status_of(site: &str) -> HostMessage {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub type SystemConfig = trunk_recorder_plugin::NoConfig;
 
 /// The plugin's settings. Doc comments become the form's labels and help text.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     /// Port
