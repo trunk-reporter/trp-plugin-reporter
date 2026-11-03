@@ -293,6 +293,7 @@ pub fn call_concluded(
     for (i, f) in record.freq_list.iter().enumerate() {
         fq.execute((id, i as i64, f.freq as i64, f.time * 1000, f.pos, f.len, f.error_count as i64, f.spike_count as i64))?;
     }
+    super::tones::index_call(conn, id)?;
     Ok(Concluded { id, known })
 }
 

@@ -10,6 +10,7 @@ pub mod sse;
 pub mod stats;
 pub mod systems;
 pub mod talkgroups;
+pub mod tones;
 pub mod transcriptions;
 pub mod types;
 pub mod units;
@@ -261,6 +262,7 @@ pub fn router(state: AppState) -> Router {
         .route("/units/{id}/talkgroups", get(units::talkgroups))
         .route("/unit-events", get(units::unit_events))
         .route("/unit-affiliations", get(units::affiliations))
+        .route("/tone-patterns", get(tones::list))
         .route("/stats", get(stats::stats))
         .route("/stats/rates", get(stats::rates))
         .route("/stats/talkgroup-activity", get(stats::talkgroup_activity))

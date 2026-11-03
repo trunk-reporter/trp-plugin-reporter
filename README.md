@@ -77,6 +77,26 @@ them. Calls it skipped or failed read as having no transcript. Search, verify,
 reject and exclude, the queue and backfill are not built and answer 501, and
 word timing is not carried.
 
+## Tone patterns
+
+From Trunk Recorder Pro 0.3.0, the recorder finds the patterns a call's tones
+make: two-tone pages, long and hi-low alert tones, pulsed tones, DTMF and KNOX
+digit strings, Morse IDs and tone sequences. Trunk Reporter keeps them, which
+tr-engine has no model for:
+
+- `GET /api/v1/tone-patterns` lists them across calls, newest first. Filter by
+  `system_id`, `tgid`, `unit_id` (the radio talking when the pattern began),
+  `call_id`, `pattern` (`two_tone,digits`), `start_time` and `end_time`. Each
+  has the record's fields (`tones`, `lengths`, `format`, `digits`, `text`,
+  `signals`, …) with the call, system, talkgroup and radio beside them.
+- A `tone_pattern` event on `/events/stream` announces each one as it is heard,
+  with the same fields. Its subtype is the pattern, so
+  `types=tone_pattern:two_tone` streams pages only.
+
+They are stored from each call's record (the `tone_patterns` its JSON has),
+so an unrecorded call's patterns are only streamed live, not kept. Calls
+stored before this version are indexed the first time it opens the store.
+
 ## Live audio
 
 Live audio is a WebSocket at `/api/v1/audio/live`. It sends PCM frames, framed
@@ -150,7 +170,9 @@ names from unit events.
 ## Spec change for tr-engine
 
 Reporter's API adds a `recorded` filter, `recorded`, `not_recorded_reason` and
-`decrypted` fields on calls, and the `not_implemented` error code. These need
+`decrypted` fields on calls, and the `not_implemented` error code. Its
+`/tone-patterns` endpoint and `tone_pattern` event are its own: they are in the
+`openapi.yaml` it serves, not proposed to tr-engine. These need
 to be added to tr-engine's `openapi.yaml`: see
 [docs/tr-engine-openapi-d6.patch](docs/tr-engine-openapi-d6.patch) (D6 in the
 design).

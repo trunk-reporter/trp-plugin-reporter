@@ -17,6 +17,11 @@ recorder's `v0.3.0` tag until 0.9 is on crates.io; it was 0.5.0. With 0.3.0:
   any traffic.
 - Unit events name their radio and talkgroup, and a call's start names its
   radios, so a radio heard only on the control channel gets its name.
+- Tone patterns (pages, alert tones, DTMF and KNOX digits, Morse IDs): a
+  `tone_pattern` event on `/events/stream` as each is heard (subtype: the
+  pattern), and `GET /tone-patterns` listing them across calls. They are stored
+  from each call's record. Calls already stored are indexed when the store is
+  first opened.
 - Stopping the server closes the event streams and live audio still open,
   instead of leaving them to the process's exit.
 
